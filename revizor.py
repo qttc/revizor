@@ -24,11 +24,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
-ASSETS = {"overlay.js": "text/javascript; charset=utf-8"}
+VENDOR = WEB / "vendor"
+JS = "text/javascript; charset=utf-8"
 TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
 HTML_SUFFIXES = {".html", ".htm"}
 ASSET_PREFIX = "/_revizor/"
@@ -50,6 +51,18 @@ def sha(text: str) -> str:
 
 def kind(doc: Path) -> str:
     return "html" if doc.suffix.lower() in HTML_SUFFIXES else "text"
+
+
+def overlay_bundle() -> bytes:
+    """Слой правок вместе с Motion. Motion – UMD: в обёртке он не видит AMD и CommonJS страницы
+    и не перетирает её window.Motion, а слою достаётся как window.__revizorMotion."""
+    motion = (VENDOR / "motion.js").read_text(encoding="utf-8")
+    wrapped = (
+        "(function(){var define,exports,module;var prev=window.Motion;\n" + motion +
+        "\n;window.__revizorMotion=window.Motion;if(prev===undefined){try{delete window.Motion}catch(e){window.Motion=undefined}}"
+        "else{window.Motion=prev}}).call(window);\n"
+    )
+    return (wrapped + (WEB / "overlay.js").read_text(encoding="utf-8")).encode("utf-8")
 
 
 def is_bundle(doc: Path) -> bool:
@@ -189,9 +202,13 @@ def make_handler(doc: Path, done: threading.Event):
                 self.send_response(302)
                 self.send_header("Location", "/doc/" + quote(doc.name))
                 self.end_headers()
-            elif path.startswith(ASSET_PREFIX) and path[len(ASSET_PREFIX):] in ASSETS:
-                name = path[len(ASSET_PREFIX):]
-                self.send(200, (WEB / name).read_bytes(), ASSETS[name])
+            elif path == ASSET_PREFIX + "overlay.js":
+                self.send(200, overlay_bundle(), JS)
+            elif path.startswith(ASSET_PREFIX + "vendor/") and re.fullmatch(r"[\w.-]+\.woff2", path.rsplit("/", 1)[-1]):
+                f = VENDOR / path.rsplit("/", 1)[-1]
+                if not f.is_file():
+                    return self.send(404, b"not found", "text/plain")
+                self.send(200, f.read_bytes(), "font/woff2")
             elif path.startswith("/doc/"):
                 # Отчёт и всё, что лежит рядом с ним: картинки, стили, скрипты по относительным путям.
                 f = (doc.parent / path[5:]).resolve()
@@ -224,6 +241,7 @@ def make_handler(doc: Path, done: threading.Event):
                         if i.get("state", "pending") == "pending" and i.get("id") not in closed_ids]
                 review["items"] = closed + live
                 review["register"] = body.get("register")
+                review["register_auto"] = bool(body.get("register_auto"))
                 review["doc_sha"] = sha(doc.read_text(encoding="utf-8"))
                 review["status"] = "done" if path == "/api/done" else "open"
                 save(doc, review)
