@@ -40,12 +40,14 @@ class ServerTest(unittest.TestCase):
 
     def test_state_returns_doc_and_empty_review(self):
         data = json.loads(urllib.request.urlopen(self.base + "/api/state").read())
-        self.assertEqual(data["doc"]["type"], "text")
+        self.assertEqual(data["doc"]["type"], "md")
         self.assertEqual(data["review"]["items"], [])
 
     def test_text_shell_keeps_text_and_loads_overlay(self):
         page = urllib.request.urlopen(self.base + "/").read().decode()
-        self.assertIn('data-revizor-mode="text"', page)
+        self.assertIn('data-revizor-mode="md"', page)
+        self.assertIn('<base href="/doc/">', page)
+        self.assertIn('<article id="revizor-md"></article>', page)
         self.assertIn("Конверсия выросла на фоне нового онбординга.", page)
         self.assertIn("/_revizor/overlay.js", page)
         self.assertIn(b"__revizor", urllib.request.urlopen(self.base + "/_revizor/overlay.js").read())
@@ -64,6 +66,18 @@ class ServerTest(unittest.TestCase):
         self.assertIn("var define,exports,module;var prev=window.Motion;", js)
         self.assertIn("window.__revizorMotion=window.Motion", js)
         self.assertLess(js.index("__revizorMotion=window.Motion"), js.index("window.__revizor = true"))
+
+    def test_md_bundle_has_parser_only_for_markdown(self):
+        js = urllib.request.urlopen(self.base + "/_revizor/overlay.js").read().decode()
+        self.assertIn("window.__revizorMd=__revizorMd", js)
+
+    def test_summary_gives_line_numbers(self):
+        r = revizor.load(self.doc)
+        r["items"] = [self.edit(), {"id": "b", "kind": "comment", "scope": "block", "selector": "p", "snippet": "абзац",
+                                    "lines": [3, 3], "comment": "короче", "state": "pending"}]
+        out = revizor.summary(self.doc, r)
+        self.assertIn("правка · строка 3", out)
+        self.assertIn("строка: 3", out)
 
     def test_fonts_served_and_vendor_locked(self):
         r = urllib.request.urlopen(self.base + "/_revizor/vendor/playfair-700-italic-cyrillic.woff2")
@@ -148,6 +162,17 @@ class HtmlServerTest(unittest.TestCase):
         out = revizor.summary(self.doc, r)
         self.assertIn("комментарий к блоку · Рынок", out)
         self.assertIn("добавь источник", out)
+
+
+class PlainTextTest(unittest.TestCase):
+    def test_txt_has_single_view_and_no_parser(self):
+        with tempfile.TemporaryDirectory() as d:
+            doc = Path(d) / "note.txt"
+            doc.write_text("# не заголовок\nпросто текст", encoding="utf-8")
+            page = revizor.text_shell(doc)
+            self.assertIn('data-revizor-mode="text"', page)
+            self.assertNotIn("revizor-md", page.split("</style>")[1])
+            self.assertNotIn(b"__revizorMd=", revizor.overlay_bundle(with_md=False))
 
 
 class CliTest(unittest.TestCase):

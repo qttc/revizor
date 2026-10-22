@@ -1,4 +1,4 @@
-// Слой правок поверх любой страницы: текстового документа (data-revizor-mode="text"), HTML-отчёта или дека.
+// Слой правок поверх любой страницы: текста (data-revizor-mode="text"), Markdown ("md"), HTML-отчёта или дека.
 // Подсветка – CSS Custom Highlight API, DOM документа не меняется. Панель – в shadow DOM, стили страницы её не задевают.
 // Слайды во фреймах того же origin – отдельные «корни» со своим текстом; бандл, который подменяет <html>, панель переживает.
 (() => {
@@ -7,9 +7,10 @@
   window.__revizor = true;
 
   const CTX = 32;
-  const MODE = document.documentElement.dataset.revizorMode === "text" ? "text" : "html";
+  const MODE = ["text", "md"].includes(document.documentElement.dataset.revizorMode) ? document.documentElement.dataset.revizorMode : "html";
+  const IS_TEXT = MODE !== "html"; // текст и Markdown: позиции правок – позиции в файле
   const SKIP = "script, style, noscript, template, textarea";
-  const REGISTERS = [["", "Определить сам"], ["report", "Отчёт"], ["deck", "Дек"], ["slack", "Slack"], ["spec", "Спека"],
+  const REGISTERS = [["", "Авто"], ["report", "Отчёт"], ["deck", "Дек"], ["slack", "Slack"], ["spec", "Спека"],
     ["doc", "Док"], ["email", "Письмо"], ["client", "Клиентская копия"], ["other", "Другое"]];
   const HL_CSS = `
     ::highlight(rv-edit) { background-color: rgba(255, 196, 0, .38); text-decoration: line-through 1.5px rgba(160, 100, 0, .9); }
@@ -30,20 +31,255 @@
   const uid = () => "r" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   const clean = (s, n) => { s = (s || "").replace(/\s+/g, " ").trim(); return s.length > n ? s.slice(0, n - 1) + "…" : s; };
   // Черновик «стало»: в HTML переносы и отступы вёрстки схлопываются, в тексте остаются как есть.
-  const draft = (quote) => (MODE === "text" ? quote : quote.replace(/\s+/g, " ").trim());
+  // В Markdown черновик – исходник выделения: если в нём есть ** или ссылка, правка сохранит оформление.
+  const draft = (quote) => (IS_TEXT ? quote : quote.replace(/\s+/g, " ").trim());
 
   // ---------- корни: страница и фреймы слайдов ----------
 
   const main = {
     key: "", label: "", frame: null,
     get doc() { return document; }, get win() { return window; },
-    get el() { return MODE === "text" ? document.getElementById("revizor-root") : document.body; },
+    get el() {
+      if (MODE === "html") return document.body;
+      return mdOn() ? document.getElementById("revizor-md") : document.getElementById("revizor-root");
+    },
   };
   const frames = new Map(); // key → корень фрейма
 
   const rootOf = (it) => (it.frame ? frames.get(it.frame) || null : main);
   const allRoots = () => [main, ...frames.values()];
   const rootByDoc = (doc) => allRoots().find((r) => r.doc === doc) || null;
+
+  // ---------- Markdown: оформленный вид с картой позиций исходника ----------
+
+  // Парсер (mdast + GFM) даёт каждому узлу точные позиции в исходнике. Каждый текстовый узел оформленного вида
+  // помнит, с какого смещения исходника он взят, поэтому выделение, подсветка и поиск места работают в позициях
+  // файла – одинаково в «Оформлении» и в «Тексте». Формат *.review.json от вида не зависит.
+  const MDP = MODE === "md" ? window.__revizorMd || null : null;
+  let SOURCE = "";
+  let mdMap = null;        // [{ node, start }] по возрастанию start
+  let mdHeads = [];        // [{ start, depth, text, line }]
+  let mdLines = [];        // смещения начала строк
+  let view = "plain";      // "md" – оформление, "plain" – текст
+
+  const mdOn = () => MODE === "md" && view === "md" && !!mdMap;
+  const lineAt = (pos) => { let lo = 0, hi = mdLines.length - 1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (mdLines[m] <= pos) lo = m; else hi = m - 1; } return lo + 1; };
+
+  function safeUrl(u) {
+    const url = (u || "").trim();
+    return /^(https?:|mailto:|#|\/|\.{0,2}\/|[^:]*$)/i.test(url) ? url : "";
+  }
+
+  // Текст узла в DOM с привязкой к исходнику. Обычно значение лежит в исходнике подряд. Экранирование (\*),
+  // сущности (&amp;) и отступы продолжения строк ломают это – тогда значение режется на куски, которые совпадают.
+  let mdPreview = false; // превью «стало» рисуется тем же кодом, но без привязки к исходнику
+  function leaf(parent, value, pos) {
+    if (!value) return;
+    if (!pos || mdPreview) { parent.append(value); return; }
+    const s0 = pos.start.offset, src = SOURCE.slice(s0, pos.end.offset);
+    const at = src.indexOf(value);
+    if (at >= 0) {
+      const t = document.createTextNode(value);
+      parent.append(t); mdMap.push({ node: t, start: s0 + at });
+      return;
+    }
+    let i = 0, j = 0, cur = null;
+    const push = (a, b, s) => { const t = document.createTextNode(value.slice(a, b)); parent.append(t); mdMap.push({ node: t, start: s }); };
+    while (i < value.length) {
+      if (j < src.length && value[i] === src[j]) { if (!cur) cur = { v: i, s: s0 + j }; i++; j++; continue; }
+      if (cur) { push(cur.v, i, cur.s); cur = null; }
+      const k = src.indexOf(value[i], j);
+      if (k >= 0 && k - j <= 12) j = k;
+      else { parent.append(value[i]); i++; }
+    }
+    if (cur) push(cur.v, i, cur.s);
+  }
+
+  function plainText(n) {
+    if (n.value) return n.value;
+    return (n.children || []).map(plainText).join("");
+  }
+
+  function mark(el, n) {
+    if (n.position) {
+      el.dataset.ls = n.position.start.line; el.dataset.le = n.position.end.line;
+      el.dataset.s = n.position.start.offset; el.dataset.e = n.position.end.offset;
+    }
+    return el;
+  }
+
+  function inline(parent, n, defs) {
+    const kids = (el) => { for (const c of n.children || []) inline(el, c, defs); return el; };
+    switch (n.type) {
+      case "text": return leaf(parent, n.value, n.position);
+      case "emphasis": return parent.append(kids(document.createElement("em")));
+      case "strong": return parent.append(kids(document.createElement("strong")));
+      case "delete": return parent.append(kids(document.createElement("del")));
+      case "inlineCode": { const c = document.createElement("code"); leaf(c, n.value, n.position); return parent.append(c); }
+      case "break": return parent.append(document.createElement("br"));
+      case "link": case "linkReference": {
+        const a = document.createElement("a");
+        const url = n.type === "link" ? n.url : (defs[n.identifier] || {}).url;
+        const href = safeUrl(url);
+        if (href) { a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer"; }
+        if (n.title) a.title = n.title;
+        return parent.append(kids(a));
+      }
+      case "image": case "imageReference": {
+        const url = n.type === "image" ? n.url : (defs[n.identifier] || {}).url;
+        const img = document.createElement("img");
+        const src = safeUrl(url); if (src) img.src = src;
+        img.alt = n.alt || ""; img.loading = "lazy";
+        return parent.append(img);
+      }
+      case "footnoteReference": { const s = document.createElement("sup"); s.textContent = `[${n.label || n.identifier}]`; return parent.append(s); }
+      case "html": { const s = document.createElement("span"); s.className = "raw"; leaf(s, n.value, n.position); return parent.append(s); }
+      default:
+        if (n.children) return parent.append(kids(document.createElement("span")));
+        if (n.value) return leaf(parent, n.value, n.position);
+    }
+  }
+
+  function block(n, defs, tight) {
+    const kids = (el, t) => { for (const c of n.children || []) { const b = block(c, defs, t); if (b) el.append(b); } return el; };
+    switch (n.type) {
+      case "paragraph": {
+        const p = document.createElement(tight ? "span" : "p");
+        for (const c of n.children) inline(p, c, defs);
+        return mark(p, n);
+      }
+      case "heading": {
+        const h = document.createElement("h" + n.depth);
+        for (const c of n.children) inline(h, c, defs);
+        if (!mdPreview) mdHeads.push({ start: n.position.start.offset, depth: n.depth, text: clean(plainText(n), 60), line: n.position.start.line });
+        return mark(h, n);
+      }
+      case "thematicBreak": return mark(document.createElement("hr"), n);
+      case "blockquote": return mark(kids(document.createElement("blockquote")), n);
+      case "list": {
+        const l = document.createElement(n.ordered ? "ol" : "ul");
+        if (n.ordered && n.start != null && n.start !== 1) l.start = n.start;
+        for (const it of n.children) {
+          const li = mark(document.createElement("li"), it);
+          if (typeof it.checked === "boolean") {
+            li.className = "task";
+            const cb = document.createElement("input"); cb.type = "checkbox"; cb.checked = it.checked; cb.disabled = true;
+            li.append(cb);
+          }
+          for (const c of it.children) { const b = block(c, defs, !n.spread && !it.spread); if (b) li.append(b); }
+          l.append(li);
+        }
+        return mark(l, n);
+      }
+      case "code": {
+        const pre = document.createElement("pre"), code = document.createElement("code");
+        if (n.lang) code.dataset.lang = n.lang;
+        leaf(code, n.value, n.position);
+        pre.append(code);
+        return mark(pre, n);
+      }
+      case "table": {
+        const wrap = mark(document.createElement("div"), n); wrap.className = "table";
+        const t = document.createElement("table");
+        n.children.forEach((row, ri) => {
+          const tr = mark(document.createElement("tr"), row);
+          row.children.forEach((cell, ci) => {
+            const td = mark(document.createElement(ri === 0 ? "th" : "td"), cell);
+            if (n.align && n.align[ci]) td.style.textAlign = n.align[ci];
+            for (const c of cell.children) inline(td, c, defs);
+            tr.append(td);
+          });
+          t.append(tr);
+        });
+        wrap.append(t);
+        return wrap;
+      }
+      case "footnoteDefinition": {
+        const d = mark(document.createElement("div"), n); d.className = "fn";
+        d.append(`[${n.label || n.identifier}] `);
+        return kids(d);
+      }
+      case "definition": return null;
+      case "html": { const d = mark(document.createElement("div"), n); d.className = "raw"; leaf(d, n.value, n.position); return d; }
+      default: {
+        if (!n.position) return null;
+        const d = mark(document.createElement("div"), n); d.className = "raw";
+        leaf(d, SOURCE.slice(n.position.start.offset, n.position.end.offset), n.position);
+        return d;
+      }
+    }
+  }
+
+  function renderMarkdown() {
+    const plain = document.getElementById("revizor-root"), box = document.getElementById("revizor-md");
+    if (!plain) return;
+    SOURCE = plain.textContent;
+    mdLines = [0];
+    for (let i = 0; i < SOURCE.length; i++) if (SOURCE[i] === "\n") mdLines.push(i + 1);
+    if (!MDP || !box) return;
+    let tree;
+    try { tree = MDP.parse(SOURCE); } catch (e) { return; } // не разобрался – остаётся «Текст»
+    const defs = {};
+    (function walk(n) { if (n.type === "definition") defs[n.identifier] = n; (n.children || []).forEach(walk); })(tree);
+    mdMap = []; mdHeads = [];
+    box.textContent = "";
+    for (const c of tree.children) { const b = block(c, defs, false); if (b) box.append(b); }
+    mdMap.sort((a, b) => a.start - b.start);
+    mdHeads.sort((a, b) => a.start - b.start);
+  }
+
+  function renderPreview(el, md) {
+    el.textContent = "";
+    let tree;
+    try { tree = MDP.parse(md); } catch (e) { el.textContent = md; return; }
+    mdPreview = true;
+    try { for (const c of tree.children) { const b = block(c, {}, true); if (b) el.append(b); } } finally { mdPreview = false; }
+  }
+
+  // Ссылки в оформленном виде не уводят со страницы, пока идёт ревью: открываются по ⌘-клику.
+  if (MODE === "md") document.addEventListener("click", (e) => {
+    const a = e.target && e.target.closest ? e.target.closest("#revizor-md a[href]") : null;
+    if (!a || blockMode || e.metaKey || e.ctrlKey) return;
+    e.preventDefault();
+    toast("Ссылка открывается по ⌘-клику");
+  }, true);
+
+  // Раздел правки – путь по заголовкам: «Зачем › Как работает».
+  function mdWhere(pos) {
+    const stack = [];
+    for (const h of mdHeads) {
+      if (h.start > pos) break;
+      while (stack.length && stack[stack.length - 1].depth >= h.depth) stack.pop();
+      stack.push(h);
+    }
+    return clean(stack.map((h) => h.text).join(" › "), 80);
+  }
+
+  // Блок в Markdown – элемент с позициями: абзац, пункт, таблица, код. Заголовок – весь раздел до следующего
+  // заголовка того же уровня или выше.
+  function mdBlockLines(el) {
+    let a = +el.dataset.ls, b = +el.dataset.le;
+    if (/^H[1-6]$/.test(el.tagName)) {
+      const depth = +el.tagName[1], start = +el.dataset.s;
+      const next = mdHeads.find((h) => h.start > start && h.depth <= depth);
+      b = next ? next.line - 1 : mdLines.length;
+      while (b > a && !SOURCE.slice(mdLines[b - 1], mdLines[b] ?? SOURCE.length).trim()) b--;
+    }
+    return [a, b];
+  }
+
+  function mdBlockLabel(el) {
+    const text = clean(el.textContent, 90);
+    switch (el.tagName) {
+      case "H1": case "H2": case "H3": case "H4": case "H5": case "H6": return `раздел: ${text}`;
+      case "LI": return `пункт: ${text}`;
+      case "PRE": return `код${el.querySelector("code")?.dataset.lang ? " " + el.querySelector("code").dataset.lang : ""}: ${clean(el.textContent, 60)}`;
+      case "BLOCKQUOTE": return `цитата: ${text}`;
+      case "UL": case "OL": return `список: ${text}`;
+      default: return el.classList.contains("table") || el.tagName === "TR" ? `таблица: ${text}` : text || "(без текста)";
+    }
+  }
+
 
   function frameKey(f) {
     const all = [...document.querySelectorAll("iframe")];
@@ -95,6 +331,7 @@
   // ---------- текст корня и смещения ----------
 
   function index(r) {
+    if (r === main && mdOn()) return { nodes: mdMap, text: SOURCE };
     const nodes = [];
     let text = "";
     if (!r.el) return { nodes, text };
@@ -197,6 +434,11 @@
   function findBlock(it) {
     const r = rootOf(it);
     if (!r) return null;
+    if (it.lines && r === main && MODE === "md") {
+      if (!mdOn()) return null;
+      const byLine = r.el.querySelector(`[data-ls="${it.lines[0]}"]:not(span)`);
+      if (byLine) return byLine;
+    }
     let el = null;
     try { el = r.doc.querySelector(it.selector); } catch (e) { /* битый селектор */ }
     const snip = (s) => clean(s, 40);
@@ -268,10 +510,10 @@
   const LAT = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD";
   const hl = document.createElement("style");
   hl.textContent = HL_CSS + `
-    ${face("playfair-700-italic-cyrillic.woff2", 700, "italic", CYR)}
-    ${face("playfair-700-italic-latin.woff2", 700, "italic", LAT)}
-    ${face("playfair-400-italic-cyrillic.woff2", 400, "italic", CYR)}
-    ${face("playfair-400-italic-latin.woff2", 400, "italic", LAT)}
+    ${face("playfair-700-italic-cyrillic.woff2", "400 900", "italic", CYR)}
+    ${face("playfair-700-italic-latin.woff2", "400 900", "italic", LAT)}
+    ${face("playfair-roman-cyrillic.woff2", "400 900", "normal", CYR)}
+    ${face("playfair-roman-latin.woff2", "400 900", "normal", LAT)}
     html[data-revizor-panel="side"] { padding-right: 404px !important; }
     html[data-revizor-panel="sheet"] { padding-bottom: 52vh !important; }`;
 
@@ -299,7 +541,7 @@
   --ink: #141417; --muted: rgba(20, 20, 26, .66); --faint: rgba(20, 20, 26, .6);
   --hair: rgba(20, 20, 26, .1); --rim: rgba(255, 255, 255, .7); --rim-low: rgba(255, 255, 255, .18);
   --edit: #b07800; --edit-soft: rgba(214, 150, 0, .16); --comment: #2563d9; --comment-soft: rgba(37, 99, 217, .13);
-  --doc: #6a5acd; --danger: #c0352b; --ok: #1f8a4c;
+  --doc: #6a5acd; --danger: #c0352b; --ok: #1f8a4c; --ok-soft: rgba(31, 138, 76, .16); --pencil: #c8321f;
   --solid: #17171b; --solid-ink: #fbfbfc; --focus: #2563d9;
   --menu: rgba(24, 24, 28, .78); --menu-ink: #f7f7f8;
   --shadow: 0 30px 70px -20px rgba(20, 20, 40, .34), 0 8px 24px -10px rgba(20, 20, 40, .2);
@@ -312,7 +554,7 @@
   --ink: #f3f3f6; --muted: rgba(243, 243, 246, .7); --faint: rgba(243, 243, 246, .6);
   --hair: rgba(255, 255, 255, .1); --rim: rgba(255, 255, 255, .28); --rim-low: rgba(255, 255, 255, .06);
   --edit: #f0b43a; --edit-soft: rgba(240, 180, 58, .16); --comment: #7aa7ff; --comment-soft: rgba(122, 167, 255, .16);
-  --doc: #a99cff; --danger: #ff7a6e; --ok: #5fd08f;
+  --doc: #a99cff; --danger: #ff7a6e; --ok: #5fd08f; --ok-soft: rgba(95, 208, 143, .2); --pencil: #ff6a52;
   --solid: #f3f3f6; --solid-ink: #141417; --focus: #7aa7ff;
   --menu: rgba(52, 52, 60, .82); --menu-ink: #f7f7f8;
   --shadow: 0 30px 70px -20px rgba(0, 0, 0, .6), 0 8px 24px -10px rgba(0, 0, 0, .4);
@@ -341,10 +583,29 @@ button { cursor: pointer; }
   display: flex; flex-direction: column; overflow: hidden; }
 #panel[hidden], #pill[hidden], #confirm[hidden], #bottom[hidden], #toast[hidden], #tb[hidden], #cover[hidden], #box[hidden] { display: none; }
 
-header { padding: 20px 20px 0 22px; display: grid; grid-template-columns: 1fr auto; column-gap: 10px; align-items: start; }
-h1 { margin: 0; font: italic 700 34px/1 "${FONT}", "Playfair Display", Georgia, serif; letter-spacing: -.005em; }
-.tagline { margin-top: 5px; font: italic 400 14.5px/1.2 "${FONT}", "Playfair Display", Georgia, serif; color: var(--muted); }
-.meta { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: .5px solid var(--hair); min-width: 0; }
+/* знак как на титуле: курсивное название и под ним мелкая разрядка капителью той же ширины */
+header { padding: 44px 18px 0; display: grid; grid-template-columns: 1fr; }
+/* афиша XIX века, по которой прошёлся корректор: «Ъ» перечёркнут, «нейрослоп» вычеркнут, на полях «стоп» */
+.bill { grid-column: 1 / -1; text-align: center; padding: 0 8px; }
+.rule { height: 4px; border-top: 2px solid var(--ink); border-bottom: .75px solid var(--ink); opacity: .85; }
+.rule.low { transform: scaleY(-1); }
+h1 { margin: 10px 0 6px; font: 900 32px/1 "${FONT}", "Playfair Display", Georgia, serif; letter-spacing: .06em; text-transform: uppercase; }
+.yer { position: relative; display: inline-block; }
+.yer svg { position: absolute; left: -4px; top: -2px; width: calc(100% + 8px); height: calc(100% + 4px); overflow: visible; pointer-events: none; }
+.bill .sub { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 10px; font: italic 400 14px/1 "${FONT}", "Playfair Display", Georgia, serif; color: var(--muted); }
+.struck { position: relative; display: inline-block; }
+.struck svg { position: absolute; left: -4px; top: 3px; width: calc(100% + 8px); height: 14px; overflow: visible; }
+.note { display: inline-block; font: italic 700 15px/1 "${FONT}", "Playfair Display", Georgia, serif; color: var(--pencil); transform: rotate(-6deg) translateY(-2px); }
+.pen { fill: none; stroke: var(--pencil); stroke-linecap: round; stroke-linejoin: round; }
+/* корректор прочерчивает правку, когда панель открылась */
+.draw .pen { stroke-dasharray: 220; stroke-dashoffset: 220; animation: pen .5s cubic-bezier(.4, 0, .2, 1) forwards; }
+.draw .yer .pen { animation-delay: .35s; } .draw .struck .pen { animation-delay: .6s; }
+.draw .note { opacity: 0; animation: note .3s ease-out .95s forwards; }
+@keyframes pen { to { stroke-dashoffset: 0; } }
+@keyframes note { from { opacity: 0; transform: rotate(-6deg) translate(-4px, -2px); } to { opacity: 1; transform: rotate(-6deg) translateY(-2px); } }
+@media (prefers-reduced-motion: reduce) { .draw .pen { animation: none; stroke-dashoffset: 0; } .draw .note { animation: none; opacity: 1; } }
+#min { position: absolute; top: 12px; right: 12px; }
+.meta { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-top: 14px; min-width: 0; }
 .docname { flex: 1; min-width: 0; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .icon-btn { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 10px; background: transparent; color: var(--muted);
   transition: background .15s, color .15s; }
@@ -357,8 +618,7 @@ h1 { margin: 0; font: italic 700 34px/1 "${FONT}", "Playfair Display", Georgia, 
 .format select:hover { background: var(--fill-hover); }
 .format::after { content: ""; position: absolute; right: 8px; top: 9px; width: 5px; height: 5px; border-right: 1.5px solid var(--muted);
   border-bottom: 1.5px solid var(--muted); transform: rotate(45deg); pointer-events: none; }
-.auto { display: inline-flex; color: var(--comment); }
-.auto[hidden] { display: none; }
+
 
 /* добавить: две равные кнопки с полными названиями, отдельной группой под шапкой */
 .tools { padding: 12px 14px 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
@@ -393,6 +653,21 @@ h1 { margin: 0; font: italic 700 34px/1 "${FONT}", "Playfair Display", Georgia, 
 .quote { font-size: 12.5px; color: var(--muted); margin: 0 0 8px; padding: 6px 9px; border-radius: 10px; background: var(--edit-soft); cursor: pointer;
   max-height: 4.6em; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .edit .quote { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--edit) 70%, transparent); }
+.quote.diff { text-decoration: none; background: var(--fill); box-shadow: inset 0 0 0 .5px var(--hair); color: var(--ink); -webkit-line-clamp: 6; max-height: none; }
+.quote.diff del { color: var(--muted); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--edit) 80%, transparent); }
+.quote.diff ins { text-decoration: none; background: var(--ok-soft); color: var(--ink); border-radius: 4px; padding: 0 2px; }
+.preview { margin-top: 6px; padding: 7px 10px; border-radius: 12px; font-size: 13px; line-height: 1.5; box-shadow: inset 0 0 0 .5px var(--hair); }
+.preview[hidden] { display: none; }
+.preview > * { margin: 0; }
+.preview code { font: 12px ui-monospace, Menlo, monospace; background: var(--fill); padding: 0 4px; border-radius: 5px; }
+.preview a { color: var(--comment); }
+
+#view { position: fixed; top: 14px; transform: translateX(-50%); z-index: 2147483646; display: flex; gap: 2px; padding: 3px; border-radius: 999px; }
+#view[hidden] { display: none; }
+#view button { height: 30px; padding: 0 14px; border: 0; border-radius: 999px; background: none; color: var(--muted); font-size: 12.5px; font-weight: 500;
+  transition: background .15s, color .15s; }
+#view button:hover { color: var(--ink); }
+#view button[aria-checked="true"] { background: var(--solid); color: var(--solid-ink); }
 .comment .quote { background: var(--comment-soft); }
 textarea, input { width: 100%; border: 0; border-radius: 12px; padding: 8px 10px; background: var(--field); box-shadow: inset 0 0 0 .5px var(--hair);
   color: var(--ink); transition: box-shadow .15s, background .15s; }
@@ -415,7 +690,8 @@ details[open] summary::before { transform: rotate(45deg); }
 footer { padding: 10px 16px 14px; }
 .row { display: flex; align-items: center; gap: 10px; min-height: 36px; }
 #status { flex: 1; color: var(--muted); font-size: 12.5px; display: flex; align-items: center; gap: 7px; min-width: 0; }
-#status .led { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; transition: background .2s; }
+#status .led { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex: none; transition: background .2s, opacity .3s; }
+#status[data-state="idle"] .led { opacity: 0; }
 #status[data-state="saving"] .led { background: var(--edit); }
 #status[data-state="error"] { color: var(--danger); }
 #status[data-state="error"] .led { background: var(--danger); }
@@ -431,7 +707,7 @@ footer { padding: 10px 16px 14px; }
 
 #pill { position: fixed; right: 18px; bottom: 18px; z-index: 2147483646; height: 44px; padding: 0 18px 0 16px; border-radius: 999px; border: 0;
   display: flex; align-items: center; gap: 10px; color: var(--ink); }
-#pill .t { font: italic 700 20px/1 "${FONT}", Georgia, serif; }
+#pill .t { font: 900 15px/1 "${FONT}", Georgia, serif; letter-spacing: .07em; text-transform: uppercase; }
 #pill .n { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--solid); color: var(--solid-ink); font-size: 11.5px;
   font-weight: 600; display: grid; place-items: center; }
 
@@ -459,25 +735,31 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
 .ghost.comment { background: var(--comment-soft); }
 #cover { position: fixed; inset: 0; z-index: 2147483647; display: grid; place-items: center; text-align: center;
   background: color-mix(in srgb, var(--tint) 60%, transparent); -webkit-backdrop-filter: blur(24px) saturate(160%); backdrop-filter: blur(24px) saturate(160%); }
-#cover h2 { margin: 0 0 10px; font: italic 700 46px/1 "${FONT}", Georgia, serif; }
+#cover h2 { margin: 0 0 12px; padding: 12px 6px; font: 900 40px/1 "${FONT}", Georgia, serif; letter-spacing: .07em; text-transform: uppercase;
+  border-top: 2px solid var(--ink); border-bottom: 2px solid var(--ink); }
 #cover p { margin: 0; color: var(--muted); font-size: 14px; }
 
 @media (max-width: 760px) {
-  #panel { top: auto; left: 8px; right: 8px; bottom: 8px; width: auto; height: 50vh; border-radius: 24px; }
-  header { padding: 14px 16px 0 18px; } h1 { font-size: 26px; } .tagline { font-size: 13px; margin-top: 3px; }
-  .meta { margin-top: 10px; padding-top: 8px; } .tools { padding: 8px 12px; } .tools-label { display: none; }
+  /* снизу панель лежит прямо на тексте документа – подложка плотнее, чтобы строки под ней не спорили с карточками */
+  #panel { top: auto; left: 8px; right: 8px; bottom: 8px; width: auto; height: 50vh; border-radius: 24px; background: var(--tint-strong); }
+  header { padding: 30px 14px 0 16px; } h1 { font-size: 27px; margin: 8px 0 5px; } #min { top: 6px; right: 8px; }
+  .meta { margin-top: 10px; } .tools { padding: 8px 12px; } .tools-label { display: none; }
   #toast { left: 16px !important; right: 16px; bottom: calc(50vh + 20px) !important; max-width: none; }
 }
 </style>
 <div class="p">
   <section id="panel" class="glass" aria-label="Ревизор – правки к документу">
     <header>
-      <div><h1>Ревизор</h1><div class="tagline">Стоп нейрослоп</div></div>
+      <div class="bill draw" aria-label="Ревизор. Стоп нейрослоп">
+        <div class="rule"></div>
+        <h1 aria-hidden="true">Ревизор<span class="yer">ъ<svg viewBox="0 0 30 40" preserveAspectRatio="none"><path class="pen" d="M4 33 C 11 24, 20 14, 27 5" stroke-width="1.6"/></svg></span></h1>
+        <div class="sub" aria-hidden="true"><span class="struck">нейрослоп<svg viewBox="0 0 100 14" preserveAspectRatio="none"><path class="pen" d="M1 8.5 C 20 6.5, 40 8.2, 60 6.8 S 88 6.2, 99 7.4" stroke-width="2.2"/></svg></span><span class="note">— стоп</span></div>
+        <div class="rule low"></div>
+      </div>
       <button class="icon-btn" id="min" title="Свернуть панель" aria-label="Свернуть панель">${icon("collapse", 18)}</button>
       <div class="meta">
         <span class="docname" id="name">…</span>
         <label class="format" title="Формат текста. Попадает в стилевые пары вместе с правками">
-          <span class="auto" id="auto" title="Формат определён автоматически">${icon("auto", 14)}</span>
           <select id="reg" name="revizor-format" aria-label="Формат текста"></select>
         </label>
       </div>
@@ -501,7 +783,10 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
       </div>
     </footer>
   </section>
-  <button id="pill" class="glass" hidden aria-label="Открыть панель правок"><span class="t">Ревизор</span><span class="n" id="pill-n">0</span></button>
+  <button id="pill" class="glass" hidden aria-label="Открыть панель правок"><span class="t">Ревизоръ</span><span class="n" id="pill-n">0</span></button>
+  <div id="view" class="glass" role="radiogroup" aria-label="Вид документа" hidden>
+    <button data-v="md" role="radio" aria-checked="false">Оформление</button><button data-v="plain" role="radio" aria-checked="false">Текст</button>
+  </div>
   <div id="tb" role="toolbar" aria-label="Действия с выделением" hidden>
     <button data-kind="edit">${icon("edit", 14)}Изменить<kbd>E</kbd></button>
     <button data-kind="comment">${icon("comment", 14)}Комментарий<kbd>C</kbd></button>
@@ -525,10 +810,14 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
   }
   const syncTone = () => { sh.querySelector(".p").dataset.tone = pageTone(); };
   // в тексте нет слайдов и графиков: «Выбрать блок» там не нужен
-  if (MODE === "text") sh.querySelector(".p").classList.add("text-mode");
+  const canBlock = () => MODE === "html" || mdOn();
+  const syncTextMode = () => sh.querySelector(".p").classList.toggle("text-mode", !canBlock());
+  syncTextMode();
   // фокус ушёл в поле панели – тулбар выделения больше не нужен
   sh.addEventListener("focusin", (e) => { if (!e.composedPath().some((n) => n.id === "tb")) hideToolbar(); });
-  $("#reg").innerHTML = REGISTERS.map(([v, t]) => `<option value="${v}">${t}</option>`).join("");
+  // Пояснение – заголовком группы внутри списка: зачем вообще выбирать формат.
+  $("#reg").innerHTML = `<optgroup label="Формат подбирает правила стиля для правок">${REGISTERS.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</optgroup>`;
+  const regLabel = (v) => (REGISTERS.find(([k]) => k === v) || [, ""])[1];
 
   // Блик на кромке стекла идёт за курсором – так панель читается как материал, а не как плашка.
   for (const g of [$("#panel"), $("#pill")]) {
@@ -595,7 +884,12 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
     syncRegisterUI();
     scheduleSave();
   }
-  function syncRegisterUI() { $("#reg").value = register; $("#auto").hidden = !registerAuto || !register; }
+  // В авто список показывает «Авто · Отчёт»: видно и что формат определён сам, и какой.
+  function syncRegisterUI() {
+    const auto = $("#reg").querySelector('option[value=""]');
+    auto.textContent = registerAuto && register ? `Авто · ${regLabel(register)}` : "Авто";
+    $("#reg").value = registerAuto ? "" : register;
+  }
 
   // ---------- отрисовка ----------
 
@@ -629,7 +923,7 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
       const e = document.createElement("div"); e.className = "empty";
       e.innerHTML = `<b>Правок пока нет.</b><ol>
         <li>Выдели текст – появится «Изменить» и «Комментарий».</li>
-        ${MODE === "text" ? "" : "<li>«Выбрать блок» – клик по слайду, графику или таблице.</li>"}
+        ${!canBlock() ? "" : MODE === "md" ? "<li>«Выбрать блок» – клик по абзацу, таблице или заголовку раздела.</li>" : "<li>«Выбрать блок» – клик по слайду, графику или таблице.</li>"}
         <li>«Весь документ» – комментарий про документ целиком.</li></ol>
         <p>Закончил – напиши агенту «поправь».</p>`;
       box.append(e);
@@ -667,27 +961,91 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
     c.querySelector(".icon-btn").onclick = () => removeItem(it, c);
     if (it.scope !== "doc") {
       const q = document.createElement("button"); q.type = "button"; q.className = "quote"; q.title = "Показать в документе";
-      q.textContent = it.scope === "block" ? it.snippet : clean(it.quote, 300);
       q.onclick = () => reveal(it);
       c.append(q);
+      renderQuote(q, it);
     }
     const ta = document.createElement("textarea");
     ta.setAttribute("aria-label", it.kind === "edit" ? "Как должно быть" : "Комментарий");
     ta.name = `revizor-${it.id}`;
     if (it.kind === "edit") {
       ta.value = it.replacement;
-      ta.oninput = () => { it.replacement = ta.value; scheduleSave(); };
+      const q = c.querySelector(".quote");
+      let pv = null;
+      if (MDP) { pv = document.createElement("div"); pv.className = "preview"; pv.setAttribute("aria-label", "Как правка будет выглядеть"); }
+      const refresh = () => {
+        renderQuote(q, it);
+        if (!pv) return;
+        const show = /[*_`~\[\]#>|]/.test(it.replacement) && it.replacement !== draft(it.quote);
+        pv.hidden = !show;
+        if (show) renderPreview(pv, it.replacement);
+      };
+      let raf = 0;
+      ta.oninput = () => { it.replacement = ta.value; scheduleSave(); cancelAnimationFrame(raf); raf = requestAnimationFrame(refresh); };
+      if (MODE === "md") ta.addEventListener("keydown", (e) => mdShortcut(e, ta));
+      if (pv) { pv.hidden = true; ta.after(pv); }
+      requestAnimationFrame(refresh);
       const why = document.createElement("input"); why.placeholder = "почему – необязательно"; why.value = it.why || "";
       why.setAttribute("aria-label", "Почему");
       why.name = `revizor-${it.id}-why`;
       why.oninput = () => { it.why = why.value; scheduleSave(); };
-      c.append(ta, why);
+      c.append(ta);
+      if (pv) c.append(pv);
+      c.append(why);
     } else {
       ta.value = it.comment || ""; ta.placeholder = it.scope === "doc" ? "что поправить во всём документе" : "что поправить";
       ta.oninput = () => { it.comment = ta.value; scheduleSave(); };
       c.append(ta);
     }
     return c;
+  }
+
+  // «Было → стало» пословно: удалённое зачёркнуто, добавленное подсвечено. Пока правка не тронута – просто цитата.
+  function renderQuote(q, it) {
+    if (!q) return;
+    q.textContent = "";
+    q.classList.remove("diff");
+    if (it.scope === "block") { q.textContent = it.snippet; return; }
+    const before = clean(it.quote, 1e6), after = clean(it.replacement || "", 1e6);
+    if (it.kind !== "edit" || !after || before === after) { q.textContent = clean(it.quote, 300); return; }
+    q.classList.add("diff");
+    for (const [op, text] of wordDiff(before, after)) {
+      if (op === "=") { q.append(text); continue; }
+      const sp = document.createElement(op === "-" ? "del" : "ins"); sp.textContent = text; q.append(sp);
+    }
+  }
+
+  function wordDiff(a, b) {
+    const A = a.split(/(\s+)/).filter(Boolean), B = b.split(/(\s+)/).filter(Boolean);
+    if (A.length * B.length > 160000) return [["-", a], ["=", " "], ["+", b]];
+    const n = A.length, m = B.length, L = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = A[i] === B[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+    const out = [], add = (op, t) => { const last = out[out.length - 1]; if (last && last[0] === op) last[1] += t; else out.push([op, t]); };
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (A[i] === B[j]) { add("=", A[i]); i++; j++; }
+      else if (L[i + 1][j] >= L[i][j + 1]) add("-", A[i++]);
+      else add("+", B[j++]);
+    }
+    while (i < n) add("-", A[i++]);
+    while (j < m) add("+", B[j++]);
+    return out;
+  }
+
+  // ⌘B и ⌘I в поле «стало» оборачивают выделение в разметку Markdown.
+  function mdShortcut(e, ta) {
+    if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+    const k = e.key.toLowerCase();
+    const wrap = k === "b" || k === "и" ? "**" : k === "i" || k === "ш" ? "_" : null;
+    if (!wrap) return;
+    e.preventDefault();
+    const { selectionStart: a, selectionEnd: b, value: v } = ta;
+    const sel = v.slice(a, b);
+    const on = sel.startsWith(wrap) && sel.endsWith(wrap) && sel.length >= wrap.length * 2;
+    const next = on ? sel.slice(wrap.length, sel.length - wrap.length) : wrap + sel + wrap;
+    ta.setRangeText(next, a, b, sel ? "select" : "end");
+    if (!sel) ta.setSelectionRange(a + wrap.length, a + wrap.length);
+    ta.dispatchEvent(new Event("input"));
   }
 
   async function removeItem(it, el) {
@@ -832,7 +1190,7 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
     const it = {
       id: uid(), kind, scope: "text", start: sel.start, end: sel.end, quote,
       prefix: text.slice(Math.max(0, sel.start - CTX), sel.start), suffix: text.slice(sel.end, sel.end + CTX),
-      where: MODE === "text" ? whereText(text, sel.start) : whereEl(sel.r, el),
+      where: MODE === "md" ? mdWhere(sel.start) : MODE === "text" ? whereText(text, sel.start) : whereEl(sel.r, el),
       created: new Date().toISOString(), state: "pending",
     };
     if (sel.r.key) it.frame = sel.r.key;
@@ -865,6 +1223,10 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
 
   function blockTarget(r, e) {
     if (r === main && e.composedPath().includes(host)) return null;
+    if (r === main && mdOn()) {
+      const b = e.target && e.target.closest ? e.target.closest("[data-ls]:not(span):not(td):not(th):not(tr)") : null;
+      return b && r.el.contains(b) && b !== r.el ? b : null;
+    }
     let el = e.target;
     if (!el || el.nodeType !== 1 || !r.el || !r.el.contains(el) || el === r.el) return null;
     // фрейм слайда на странице – это блок целиком
@@ -883,8 +1245,11 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
       const fr = [...frames.values()].find((x) => x.frame === el);
       if (fr) { r = fr; el = fr.doc.body; }
     }
-    const it = { id: uid(), kind: "comment", scope: "block", selector: cssPath(r, el), snippet: r.key && el === r.doc.body ? "слайд целиком" : blockLabel(el),
-      text: clean(el.textContent, 120), where: whereEl(r, el), comment: "", created: new Date().toISOString(), state: "pending" };
+    const md = r === main && mdOn() && el.dataset.ls;
+    const it = { id: uid(), kind: "comment", scope: "block", selector: cssPath(r, el),
+      snippet: md ? mdBlockLabel(el) : r.key && el === r.doc.body ? "слайд целиком" : blockLabel(el),
+      text: clean(el.textContent, 120), where: md ? mdWhere(+el.dataset.s) : whereEl(r, el), comment: "", created: new Date().toISOString(), state: "pending" };
+    if (md) it.lines = mdBlockLines(el);
     if (r.key) it.frame = r.key;
     items.push(it); renderCards();
     flyToCard(it, { left: from.left, top: from.top, width: Math.min(from.width, 320), height: 34 });
@@ -965,9 +1330,16 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
     $("#status").dataset.state = state;
     $("#status-text").textContent = text;
   }
-  function payload() { return { register: register || null, register_auto: registerAuto, items }; }
+  function payload() { const p = { register: register || null, register_auto: registerAuto, items }; if (MODE === "md") p.view = view; return p; }
+  // Статус молчит, пока нечего сказать: число правок, короткое «Сохранено» после записи, ошибка – надолго.
+  let quietTimer = null;
+  function restStatus() {
+    const n = items.filter(keep).length;
+    setStatus(n ? "ok" : "idle", n ? `${n} ${plural(n)}` : "");
+  }
   function scheduleSave() {
-    setStatus("saving", "Сохраняю…");
+    clearTimeout(quietTimer);
+    $("#status").dataset.state = "saving";
     clearTimeout(saveTimer);
     saveTimer = setTimeout(save, 400);
   }
@@ -976,8 +1348,11 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
       const r = await fetch("/api/review", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload()) });
       if (!r.ok) throw new Error(r.status);
       syncClosed((await r.json()).closed || []);
-      const n = items.filter(keep).length;
-      setStatus("ok", n ? `Сохранено · ${n} ${plural(n)}` : "Сохранено");
+      setStatus("ok", "Сохранено");
+      const led = $("#status .led");
+      anim(led, { scale: [1, 1.9, 1], opacity: [1, 0.7, 1] }, { duration: 0.5 }).then(() => { led.style.opacity = ""; led.style.transform = ""; });
+      anim($("#status-text"), { opacity: [0, 1], x: [-4, 0] }, { duration: 0.2 });
+      quietTimer = setTimeout(restStatus, 1600);
     } catch (e) {
       setStatus("error", /^\d+$/.test(e.message) ? `Не сохранилось: ошибка сервера ${e.message}` : "Не сохранилось: сервер не отвечает");
     }
@@ -1030,7 +1405,11 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
     scheduleSave();
   };
   $("#add-block").onclick = () => setBlockMode(!blockMode);
-  $("#reg").onchange = (e) => { register = e.target.value; registerAuto = !register; if (registerAuto) applyAutoRegister(); syncRegisterUI(); scheduleSave(); };
+  $("#reg").onchange = (e) => {
+    registerAuto = !e.target.value;
+    if (registerAuto) applyAutoRegister(); else register = e.target.value;
+    syncRegisterUI(); scheduleSave();
+  };
   $("#retry").onclick = () => { scheduleSave(); };
 
   // «Готово» необратимо: сервер закрывается и правки уходят агенту. Поэтому только кликом и с подтверждением, без горячей клавиши.
@@ -1068,6 +1447,7 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
   if (window.visualViewport) for (const ev of ["resize", "scroll"]) window.visualViewport.addEventListener(ev, placeSheet);
   function syncPanelAttr() {
     const html = document.documentElement;
+    $("#view").style.left = panelOpen && !isSheet() ? "calc((100vw - 404px) / 2)" : "50%";
     if (!panelOpen) html.removeAttribute("data-revizor-panel");
     else html.setAttribute("data-revizor-panel", isSheet() ? "sheet" : "side");
   }
@@ -1108,6 +1488,28 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
 
   // ---------- старт ----------
 
+  // ---------- вид Markdown: «Оформление» или «Текст» ----------
+
+  function setView(v, save = true) {
+    if (MODE !== "md") return;
+    if (v === "md" && !mdMap) v = "plain";
+    const changed = v !== view;
+    view = v;
+    document.documentElement.setAttribute("data-revizor-view", v);
+    for (const b of sh.querySelectorAll("#view button")) b.setAttribute("aria-checked", String(b.dataset.v === v));
+    if (!changed) return;
+    hideToolbar();
+    if (blockMode) setBlockMode(false);
+    syncTextMode();
+    if (ready) { anchorRoot(main); paint(); renderCards(); if (save) scheduleSave(); }
+  }
+  if (MODE === "md") {
+    renderMarkdown();
+    setView(mdMap ? "md" : "plain", false);
+    $("#view").hidden = !mdMap;
+    $("#view").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) setView(b.dataset.v); });
+  } else if (MODE === "text") renderMarkdown(); // только SOURCE и строки, без оформления
+
   attach(main);
   ensureAttached();
   (async function init() {
@@ -1123,6 +1525,7 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
     $("#name").title = doc.path;
     register = review.register || "";
     registerAuto = review.register_auto !== false && !(review.register && review.register_auto === undefined);
+    if (MODE === "md" && review.view) setView(review.view, false);
     items = review.items.filter((i) => (i.state || "pending") === "pending");
     closed = review.items.filter((i) => (i.state || "pending") !== "pending");
     ready = true;
@@ -1132,7 +1535,7 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
     paint(); renderCards();
     if (registerAuto) applyAutoRegister();
     syncRegisterUI();
-    setStatus("ok", items.length ? `${items.length} ${plural(items.length)} с прошлого раза` : "Правки сохраняются сами");
+    if (items.length) setStatus("ok", `${items.length} ${plural(items.length)} с прошлого раза`); else restStatus();
     if (!(window.CSS && CSS.highlights)) toast("Браузер без CSS Highlight API: правки сохраняются, подсветки не будет");
   })();
 })();

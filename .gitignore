@@ -1,3 +1,4 @@
 __pycache__/
 *.review.json.tmp
 .DS_Store
+*.review.json
