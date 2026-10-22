@@ -8,7 +8,7 @@ SKILLS="$HOME/.claude/skills"
 LINK="$SKILLS/revizor"
 OLD="$SKILLS/review"
 
-if [[ -L "$OLD" && "$(readlink "$OLD")" == */Personal/review/skill ]]; then
+if [[ -L "$OLD" && "$(readlink "$OLD")" == */review/skill ]]; then
   rm "$OLD"
   echo "unlink $OLD (старое имя)"
 fi
