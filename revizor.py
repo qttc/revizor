@@ -5,8 +5,10 @@
                                                     FILE – .md/.markdown/.txt или .html/.htm
     revizor.py show FILE [--json]                     правки, которые ждут агента
     revizor.py mark FILE ID... --state applied|rejected [--note TEXT]
+    revizor.py update [--check]                      обновиться из репо (git pull) и показать, что поменялось
 
-Правки лежат рядом с документом: report.md → report.review.json. Формат – в README.md.
+Правки лежат рядом с документом: report.md → report.review.json. Формат – в docs/technical.md.
+Проверка новой версии – раз в сутки при open, выключается REVIZOR_NO_UPDATE_CHECK=1.
 Только stdlib, Python 3.9+.
 """
 import argparse
@@ -14,17 +16,19 @@ import hashlib
 import html
 import json
 import mimetypes
+import os
 import re
 import socket
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -228,13 +232,98 @@ def summary(doc: Path, review: dict) -> str:
     return "\n".join(out)
 
 
+# ---------- обновления ----------
+
+REPO_URL = "https://github.com/qttc/revizor.git"
+UPDATE_CACHE = Path.home() / ".cache" / "revizor" / "update.json"
+UPDATE_TTL = 24 * 3600
+
+
+def parse_version(v: str):
+    m = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", (v or "").strip())
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def latest_release(timeout: float = 3.0):
+    """Самый свежий тег vX.Y.Z в публичном репо. Ходит только git ls-remote: никаких данных о документах."""
+    try:
+        out = subprocess.run(["git", "ls-remote", "--tags", "--refs", REPO_URL, "v*"], capture_output=True, text=True,
+                             timeout=timeout, env=dict(os.environ, GIT_TERMINAL_PROMPT="0")).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    versions = [v for v in (parse_version(line.rsplit("/", 1)[-1]) for line in out.splitlines()) if v]
+    return ".".join(map(str, max(versions))) if versions else None
+
+
+def check_update(force: bool = False):
+    """Есть ли версия новее текущей. Сеть – не чаще раза в сутки, без сети молча None.
+    Выключается переменной REVIZOR_NO_UPDATE_CHECK=1."""
+    if os.environ.get("REVIZOR_NO_UPDATE_CHECK") == "1":
+        return None
+    latest = None
+    try:
+        cached = json.loads(UPDATE_CACHE.read_text(encoding="utf-8"))
+        if not force and time.time() - cached.get("checked", 0) < UPDATE_TTL:
+            latest = cached.get("latest")
+    except (OSError, ValueError):
+        cached = None
+    if latest is None:
+        latest = latest_release()
+        if latest:
+            try:
+                UPDATE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+                UPDATE_CACHE.write_text(json.dumps({"checked": time.time(), "latest": latest}), encoding="utf-8")
+            except OSError:
+                pass
+    if latest and parse_version(latest) > parse_version(__version__):
+        return {"current": __version__, "latest": latest}
+    return None
+
+
+def changelog_between(old: str, new: str) -> str:
+    """Разделы CHANGELOG новее old и не новее new – что поменялось при обновлении."""
+    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    parts = re.split(r"(?m)^## \[", text)[1:]
+    out = []
+    for part in parts:
+        ver = parse_version(part.split("]", 1)[0])
+        if ver and parse_version(old) < ver <= parse_version(new):
+            out.append("## [" + part.rstrip())
+    return "\n\n".join(out)
+
+
+def cmd_update(args) -> int:
+    if args.check:
+        info = check_update(force=True)
+        print(f"Доступна {info['latest']}, у тебя {info['current']}." if info else f"Последняя версия: {__version__}.")
+        return 0
+    git = lambda *a: subprocess.run(["git", "-C", str(ROOT), *a], capture_output=True, text=True)
+    if git("rev-parse", "--is-inside-work-tree").returncode != 0:
+        sys.exit(f"Ревизор в {ROOT} поставлен не через git clone. Переставь: git clone {REPO_URL}")
+    dirty = [l[3:] for l in git("status", "--porcelain").stdout.splitlines() if l.strip()]
+    if dirty:
+        sys.exit("Обновление остановлено: в папке Ревизора есть свои изменения – " + ", ".join(dirty))
+    old = __version__
+    pull = git("pull", "--ff-only")
+    if pull.returncode != 0:
+        sys.exit("git pull не прошёл:\n" + (pull.stderr or pull.stdout).strip())
+    subprocess.run([str(ROOT / "install.sh")], check=False)
+    new = re.search(r'__version__ = "([^"]+)"', (ROOT / "revizor.py").read_text(encoding="utf-8")).group(1)
+    if new == old:
+        print(f"Уже последняя версия: {old}.")
+        return 0
+    print(f"Ревизор обновлён: {old} → {new}. Открытые редакторы подхватят новую версию после перезапуска open.\n")
+    print(changelog_between(old, new))
+    return 0
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
-def make_handler(doc: Path, done: threading.Event):
+def make_handler(doc: Path, done: threading.Event, update=None):
     doc = doc.resolve()
     lock = threading.Lock()
 
@@ -290,7 +379,7 @@ def make_handler(doc: Path, done: threading.Event):
                 with lock:
                     review = load(doc)
                 self.send_json({"doc": {"name": doc.name, "path": str(doc), "type": kind(doc), "sha": sha(text)},
-                                "review": review})
+                                "review": review, "update": update})
             else:
                 self.send(404, b"not found", "text/plain")
 
@@ -336,9 +425,13 @@ def cmd_open(args) -> int:
         review["status"] = "open"
         save(doc, review)
 
+    update = check_update()
+    if update:
+        print(f"Доступна новая версия Ревизора: {update['latest']}, у тебя {update['current']}. "
+              f"Обновить: revizor.py update (или агенту – «обнови ревизор»).", file=sys.stderr, flush=True)
     done = threading.Event()
     port = args.port or free_port()
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(doc, done))
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(doc, done, update))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{port}/?v={int(datetime.now().timestamp())}"
     print(f"Редактор: {url}\nПравки: {sidecar(doc)}", file=sys.stderr, flush=True)
@@ -402,6 +495,9 @@ def main(argv=None) -> int:
     p.add_argument("--state", choices=["applied", "rejected"], required=True)
     p.add_argument("--note")
     p.set_defaults(fn=cmd_mark)
+    p = sub.add_parser("update", help="обновить Ревизор из репо (git pull) и показать, что поменялось")
+    p.add_argument("--check", action="store_true", help="только проверить, есть ли новая версия")
+    p.set_defaults(fn=cmd_update)
     args = ap.parse_args(argv)
     return args.fn(args)
 
