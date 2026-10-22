@@ -9,7 +9,7 @@ description: revizor – открыть документ в локальном �
 
 Связку держит этот чат: агент открыл редактор, запомнил путь к файлу правок и применяет их, когда владелец скажет.
 
-Инструмент: `~/Personal/revizor/revizor.py`. Формат файла правок – `~/Personal/revizor/README.md`.
+Инструмент: `~/Personal/revizor/revizor.py`. Формат файла правок – `~/Personal/revizor/docs/technical.md`.
 
 ## Запуск
 
