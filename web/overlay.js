@@ -14,7 +14,7 @@
     ["doc", "Док"], ["email", "Письмо"], ["client", "Клиентская копия"], ["other", "Другое"]];
   const HL_CSS = `
     ::highlight(rv-edit) { background-color: rgba(255, 196, 0, .38); text-decoration: line-through 1.5px rgba(160, 100, 0, .9); }
-    ::highlight(rv-comment) { background-color: rgba(70, 140, 255, .28); }
+    ::highlight(rv-comment) { background-color: rgba(255, 196, 0, .28); text-decoration: underline dotted 1.5px rgba(200, 130, 0, .95); text-underline-offset: 3px; }
     ::highlight(rv-flash) { background-color: rgba(255, 150, 0, .75); }
     html[data-revizor-block] * { cursor: crosshair !important; }`;
 
@@ -668,7 +668,7 @@ h1 { margin: 10px 0 6px; font: 900 32px/1 "${FONT}", "Playfair Display", Georgia
   transition: background .15s, color .15s; }
 #view button:hover { color: var(--ink); }
 #view button[aria-checked="true"] { background: var(--solid); color: var(--solid-ink); }
-.comment .quote { background: var(--comment-soft); }
+.comment .quote { background: var(--edit-soft); }
 textarea, input { width: 100%; border: 0; border-radius: 12px; padding: 8px 10px; background: var(--field); box-shadow: inset 0 0 0 .5px var(--hair);
   color: var(--ink); transition: box-shadow .15s, background .15s; }
 textarea { min-height: 62px; resize: vertical; line-height: 1.45; }
@@ -704,6 +704,9 @@ footer { padding: 10px 16px 14px; }
 .btn.solid { background: var(--solid); color: var(--solid-ink); box-shadow: none; }
 .btn.solid:hover { background: color-mix(in srgb, var(--solid) 88%, var(--comment)); }
 #confirm-text { flex: 1; font-size: 12.5px; color: var(--ink); }
+.upd { margin-top: 6px; padding: 7px 10px; border-radius: 10px; font-size: 12px; color: var(--muted); background: var(--fill); box-shadow: inset 0 0 0 .5px var(--hair); }
+.upd[hidden] { display: none; }
+.upd b { color: var(--ink); font-weight: 600; }
 
 #pill { position: fixed; right: 18px; bottom: 18px; z-index: 2147483646; height: 44px; padding: 0 18px 0 16px; border-radius: 999px; border: 0;
   display: flex; align-items: center; gap: 10px; color: var(--ink); }
@@ -776,6 +779,7 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
         <button class="btn" id="retry">${icon("retry", 14)} Повторить</button>
         <button class="btn solid" id="done">Готово</button>
       </div>
+      <div class="upd" id="upd" hidden></div>
       <div class="row" id="confirm" hidden>
         <span id="confirm-text"></span>
         <button class="btn" id="confirm-no">Отмена</button>
@@ -1520,7 +1524,13 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
       setStatus("error", "Сервер не отвечает – перезапусти revizor");
       return;
     }
-    const { doc, review } = state;
+    const { doc, review, update } = state;
+    // Новая версия: тихая строка внизу. Обновляет агент – из вкладки код, который её держит, не обновить.
+    if (update) {
+      $("#upd").innerHTML = `Вышла версия <b></b>, у тебя ${update.current}. Скажи агенту «обнови ревизор».`;
+      $("#upd b").textContent = update.latest;
+      $("#upd").hidden = false;
+    }
     $("#name").textContent = doc.name;
     $("#name").title = doc.path;
     register = review.register || "";

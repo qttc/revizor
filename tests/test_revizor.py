@@ -1,5 +1,7 @@
 import io
 import json
+import os
+import re
 import sys
 import tempfile
 import threading
@@ -219,3 +221,63 @@ class CliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpdateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = (revizor.UPDATE_CACHE, revizor.latest_release, os.environ.pop("REVIZOR_NO_UPDATE_CHECK", None))
+        revizor.UPDATE_CACHE = Path(self.tmp.name) / "update.json"
+        self.calls = 0
+
+    def tearDown(self):
+        revizor.UPDATE_CACHE, revizor.latest_release, env = self.saved
+        os.environ.pop("REVIZOR_NO_UPDATE_CHECK", None)
+        if env is not None:
+            os.environ["REVIZOR_NO_UPDATE_CHECK"] = env
+        self.tmp.cleanup()
+
+    def fake(self, version):
+        def latest(timeout=3.0):
+            self.calls += 1
+            return version
+        revizor.latest_release = latest
+
+    def test_newer_version_reported_and_cached(self):
+        self.fake("99.0.0")
+        info = revizor.check_update()
+        self.assertEqual(info, {"current": revizor.__version__, "latest": "99.0.0"})
+        revizor.check_update()  # второй раз – из кэша, без сети
+        self.assertEqual(self.calls, 1)
+
+    def test_same_or_older_version_is_quiet(self):
+        self.fake(revizor.__version__)
+        self.assertIsNone(revizor.check_update())
+        self.fake("0.0.1")
+        self.assertIsNone(revizor.check_update(force=True))
+
+    def test_offline_is_quiet(self):
+        self.fake(None)
+        self.assertIsNone(revizor.check_update())
+
+    def test_can_be_switched_off(self):
+        self.fake("99.0.0")
+        os.environ["REVIZOR_NO_UPDATE_CHECK"] = "1"
+        self.assertIsNone(revizor.check_update())
+        self.assertEqual(self.calls, 0)
+
+    def test_parse_version(self):
+        self.assertEqual(revizor.parse_version("v0.3.1"), (0, 3, 1))
+        self.assertIsNone(revizor.parse_version("latest"))
+
+
+class ReleaseHygieneTest(unittest.TestCase):
+    def test_version_matches_changelog(self):
+        text = (Path(revizor.__file__).parent / "CHANGELOG.md").read_text(encoding="utf-8")
+        top = re.search(r"(?m)^## \[(\d+\.\d+\.\d+)\]", text).group(1)
+        self.assertEqual(top, revizor.__version__, "подними __version__ или раздел CHANGELOG")
+
+    def test_changelog_between_versions(self):
+        out = revizor.changelog_between("0.2.0", "0.3.0")
+        self.assertIn("## [0.3.0]", out)
+        self.assertNotIn("## [0.2.0]", out)
