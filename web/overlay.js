@@ -929,6 +929,10 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
 
   function renderCards() {
     const box = $("#cards");
+    // перерисовка не должна выбивать из поля, в котором печатают: запомнить поле и курсор, вернуть после
+    const act = sh.activeElement, actCard = act && act.closest && act.closest(".card");
+    const keep = actCard && /^(TEXTAREA|INPUT)$/.test(act.tagName)
+      ? { id: actCard.dataset.id, n: [...actCard.querySelectorAll("textarea, input")].indexOf(act), s: act.selectionStart, e: act.selectionEnd, top: box.scrollTop } : null;
     box.textContent = "";
     const all = [
       ...items.filter((i) => i.scope === "doc"),
@@ -961,6 +965,10 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     }
     $("#pill-n").textContent = String(items.length);
     if (box.scrollTop <= 2) $("#panel").classList.remove("compact");
+    if (keep) {
+      const c = box.querySelector(`.card[data-id="${keep.id}"]`), f = c && c.querySelectorAll("textarea, input")[keep.n];
+      if (f) { box.scrollTop = keep.top; f.focus({ preventScroll: true }); f.setSelectionRange(keep.s, keep.e); }
+    }
   }
 
   function card(it) {
@@ -1216,7 +1224,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       id: uid(), kind, scope: "text", start: sel.start, end: sel.end, quote,
       prefix: text.slice(Math.max(0, sel.start - CTX), sel.start), suffix: text.slice(sel.end, sel.end + CTX),
       where: MODE === "md" ? mdWhere(sel.start) : MODE === "text" ? whereText(text, sel.start) : whereEl(sel.r, el),
-      created: new Date().toISOString(), state: "pending",
+      created: new Date().toISOString(), state: "pending", orphan: false, // без поля первая же привязка сочтёт правку сдвинутой и перерисует список
     };
     if (sel.r.key) it.frame = sel.r.key;
     if (kind === "edit") { it.replacement = draft(quote); it.why = ""; } else { it.comment = ""; }
