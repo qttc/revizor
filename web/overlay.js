@@ -762,6 +762,39 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
 #panel.compact .tools { padding-top: 8px; }
 #panel.compact #min { top: 6px; }
 @media (prefers-reduced-motion: reduce) { header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: opacity .2s; } }
+
+/* Live Edit: переключатель в шапке, у карточки своя кнопка и состояние – видно, какая правка у агента, а какая ещё черновик */
+.live { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-top: 6px; min-width: 0; font-size: 12.5px; color: var(--muted); }
+.live label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--ink); font-weight: 600; flex: none; }
+.switch { appearance: none; -webkit-appearance: none; position: relative; width: 30px; height: 18px; margin: 0; border-radius: 999px; cursor: pointer;
+  background: var(--fill-hover); box-shadow: inset 0 0 0 .5px var(--hair); transition: background .2s; }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .3); transition: transform .2s cubic-bezier(.4, 0, .2, 1); }
+.switch:checked { background: var(--ok); }
+.switch:checked::after { transform: translateX(12px); }
+.switch:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.beta { flex: none; padding: 2px 6px; border-radius: 6px; font-size: 10.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  box-shadow: inset 0 0 0 .5px var(--hair); }
+.live-hint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#panel.compact .live { margin-top: 4px; } #panel.compact .live-hint { visibility: hidden; }
+.foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; min-height: 30px; }
+.foot .st { flex: 1; min-width: 0; display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+.foot .st .led { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--muted); }
+.card.draft .foot .st .led { display: none; }
+.card.working .foot .st { color: var(--ink); font-weight: 600; }
+.card.working .foot .st .led { background: var(--edit); animation: work 1.1s ease-in-out infinite; }
+.card.stale .foot .st { color: var(--danger); }
+@keyframes work { 50% { opacity: .25; transform: scale(.7); } }
+@media (prefers-reduced-motion: reduce) { .card.working .foot .st .led { animation: none; } }
+.btn.sm { height: 30px; padding: 0 12px; font-size: 12.5px; }
+.btn:disabled { opacity: .4; cursor: default; transform: none; }
+.card.queued, .card.working { background: transparent; }
+.card.working { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--edit) 75%, transparent); }
+.card textarea[readonly], .card input[readonly] { color: var(--muted); box-shadow: none; background: transparent; resize: none; cursor: default;
+  min-height: 0; field-sizing: content; padding: 2px 10px; }
+.card.working .head .icon-btn { display: none; } /* агент уже правит документ по ней */
+/* в Live Edit главное действие – «Отправить агенту» у карточки, завершение уходит на второй план */
+.p.live #done { background: var(--fill); color: var(--ink); box-shadow: inset 0 0 0 .5px var(--hair); }
 </style>
 <div class="p">
   <section id="panel" class="glass" aria-label="Ревизор – правки к документу">
@@ -779,6 +812,10 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
           <select id="reg" name="revizor-format" aria-label="Формат текста"></select>
         </label>
       </div>
+      <div class="live" title="Каждая правка уходит агенту своей кнопкой и применяется сразу, документ обновляется на месте">
+        <label><input type="checkbox" class="switch" id="live" role="switch" name="revizor-live">Live Edit</label><span class="beta">бета</span>
+        <span class="live-hint" id="live-hint"></span>
+      </div>
     </header>
     <div class="tools" role="group" aria-labelledby="tools-label">
       <span class="tools-label" id="tools-label">Комментарий</span>
@@ -790,7 +827,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       <div class="row" id="bottom">
         <span id="status" role="status" aria-live="polite"><span class="led"></span><span id="status-text">Загрузка…</span></span>
         <button class="btn" id="retry">${icon("retry", 14)} Повторить</button>
-        <button class="btn solid" id="done">Готово</button>
+        <button class="btn solid" id="done">Завершить ревью</button>
       </div>
       <div class="upd" id="upd" hidden></div>
       <div class="row" id="confirm" hidden>
@@ -931,7 +968,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     const box = $("#cards");
     // перерисовка не должна выбивать из поля, в котором печатают: запомнить поле и курсор, вернуть после
     const act = sh.activeElement, actCard = act && act.closest && act.closest(".card");
-    const keep = actCard && /^(TEXTAREA|INPUT)$/.test(act.tagName)
+    const kept = actCard && /^(TEXTAREA|INPUT)$/.test(act.tagName)
       ? { id: actCard.dataset.id, n: [...actCard.querySelectorAll("textarea, input")].indexOf(act), s: act.selectionStart, e: act.selectionEnd, top: box.scrollTop } : null;
     box.textContent = "";
     const all = [
@@ -946,7 +983,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
         <li>Выдели текст – появится «Изменить» и «Комментарий».</li>
         ${!canBlock() ? "" : MODE === "md" ? "<li>«Выбрать блок» – клик по абзацу, таблице или заголовку раздела.</li>" : "<li>«Выбрать блок» – клик по слайду, графику или таблице.</li>"}
         <li>«Общий комментарий» – про документ целиком.</li></ol>
-        <p>Закончил – жми «Готово», агент применит правки.</p>`;
+        <p>${live ? "Пиши правку и жми «Отправить агенту» – он применит её сразу." : "Закончил – жми «Завершить ревью», агент применит правки."}</p>`;
       box.append(e);
     }
     for (const it of all) box.append(card(it));
@@ -965,9 +1002,9 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     }
     $("#pill-n").textContent = String(items.length);
     if (box.scrollTop <= 2) $("#panel").classList.remove("compact");
-    if (keep) {
-      const c = box.querySelector(`.card[data-id="${keep.id}"]`), f = c && c.querySelectorAll("textarea, input")[keep.n];
-      if (f) { box.scrollTop = keep.top; f.focus({ preventScroll: true }); f.setSelectionRange(keep.s, keep.e); }
+    if (kept) {
+      const c = box.querySelector(`.card[data-id="${kept.id}"]`), f = c && c.querySelectorAll("textarea, input")[kept.n];
+      if (f && !f.readOnly) { box.scrollTop = kept.top; f.focus({ preventScroll: true }); f.setSelectionRange(kept.s, kept.e); }
     }
   }
 
@@ -985,6 +1022,8 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     where.textContent = lost ? "место не найдено" : it.where || "";
     if (lost) where.classList.add("lost");
     c.querySelector(".icon-btn").onclick = () => removeItem(it, c);
+    const st = live ? stage(it) : null;
+    if (st) c.classList.add(st);
     if (it.scope !== "doc") {
       const q = document.createElement("button"); q.type = "button"; q.className = "quote"; q.title = "Показать в документе";
       q.onclick = () => reveal(it);
@@ -1023,8 +1062,86 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       ta.oninput = () => { it.comment = ta.value; scheduleSave(); };
       c.append(ta);
     }
+    if (st) liveFoot(c, it, st);
     return c;
   }
+
+  // ---------- Live Edit ----------
+  // Черновик → «Отправить агенту» → в очереди (можно отозвать) → агент применяет → карточка уходит в историю.
+  // Пока правка у агента, поля закрыты: правится то, что он видит.
+  const stage = (it) => (it.taken ? "working" : it.sent ? "queued" : "draft");
+  const STALE_MS = 60000;
+  const isStale = (it) => it.sent && !it.taken && Date.now() - Date.parse(it.sent) > STALE_MS;
+  function liveFoot(c, it, st) {
+    for (const f of c.querySelectorAll("textarea, input")) { f.readOnly = st !== "draft"; if (f.readOnly && !f.value) f.hidden = true; }
+    const foot = document.createElement("div"); foot.className = "foot";
+    foot.innerHTML = `<span class="st"><span class="led"></span><span class="t"></span></span>`;
+    const t = foot.querySelector(".t");
+    if (st === "draft") {
+      const b = document.createElement("button"); b.className = "btn solid sm"; b.textContent = "Отправить агенту";
+      const sync = () => { b.disabled = !keep(it); };
+      sync(); c.addEventListener("input", sync);
+      b.onclick = () => { it.sent = new Date().toISOString(); delete it.taken; renderCards(); restStatus(); scheduleSave(); };
+      foot.append(b);
+    } else if (st === "queued") {
+      const stale = isStale(it);
+      c.classList.toggle("stale", stale);
+      t.textContent = stale ? "Агент не забирает – напиши в чат «поправь»" : "В очереди у агента";
+      const b = document.createElement("button"); b.className = "btn sm"; b.textContent = "Отозвать";
+      b.onclick = () => { delete it.sent; renderCards(); restStatus(); scheduleSave(); };
+      foot.append(b);
+    } else t.textContent = "Агент применяет…";
+    c.append(foot);
+  }
+
+  let live = false, pollTimer = null, docSha = null, reloadWanted = false, lastStale = "";
+  function setLive(on, save = true) {
+    live = on;
+    $("#live").checked = on;
+    sh.querySelector(".p").classList.toggle("live", on);
+    $("#live-hint").textContent = on ? "правки уходят по одной" : "";
+    // выключили – неотправленное агенту остаётся черновиком; то, что он уже забрал, он доделает
+    if (!on) for (const it of items) if (!it.taken) delete it.sent;
+    clearInterval(pollTimer);
+    if (on) pollTimer = setInterval(poll, 1500);
+    if (ready) { renderCards(); restStatus(); if (save) scheduleSave(); }
+  }
+  $("#live").onchange = (e) => setLive(e.target.checked);
+
+  async function poll() {
+    let st;
+    try { st = await (await fetch("/api/state")).json(); } catch (e) { return; }
+    const byId = new Map(st.review.items.map((i) => [i.id, i]));
+    let changed = false;
+    for (const it of items) {
+      const f = byId.get(it.id);
+      if (f && f.taken && !it.taken) { it.taken = f.taken; changed = true; }
+    }
+    syncClosed(st.review.items.filter((i) => (i.state || "pending") !== "pending"));
+    const stale = items.filter(isStale).map((i) => i.id).join();
+    if (stale !== lastStale) { lastStale = stale; changed = true; }
+    if (changed) { renderCards(); restStatus(); }
+    if (docSha && st.doc.sha !== docSha) { docSha = st.doc.sha; reloadDoc(); }
+  }
+
+  // Агент поменял файл: текст и Markdown перерисовываются на месте, HTML перезагружается.
+  // Пока печатаешь в поле, перезагрузка ждёт – иначе она съест набранное.
+  const typing = () => { const a = sh.activeElement; return !!(a && /^(TEXTAREA|INPUT)$/.test(a.tagName) && a.closest(".card")); };
+  async function reloadDoc() {
+    if (MODE === "html") {
+      if (typing()) { reloadWanted = true; return; }
+      try { sessionStorage.setItem("revizor-scroll", JSON.stringify({ x: scrollX, y: scrollY, c: $("#cards").scrollTop })); } catch (e) {}
+      location.reload();
+      return;
+    }
+    let text;
+    try { text = await (await fetch("/api/source")).text(); } catch (e) { return; }
+    document.getElementById("revizor-root").textContent = text;
+    renderMarkdown();
+    if (MODE === "md") { $("#view").hidden = !mdMap; if (!mdMap && view === "md") setView("plain", false); }
+    anchorRoot(main); paint(); renderCards();
+  }
+  sh.addEventListener("focusout", () => setTimeout(() => { if (reloadWanted && !typing()) { reloadWanted = false; reloadDoc(); } }, 0));
 
   // «Было → стало» пословно: удалённое зачёркнуто, добавленное подсвечено. Пока правка не тронута – просто цитата.
   function renderQuote(q, it) {
@@ -1363,10 +1480,14 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     $("#status").dataset.state = state;
     $("#status-text").textContent = text;
   }
-  function payload() { const p = { register: register || null, register_auto: registerAuto, items }; if (MODE === "md") p.view = view; return p; }
+  function payload() { const p = { register: register || null, register_auto: registerAuto, items, live }; if (MODE === "md") p.view = view; return p; }
   // Статус молчит, пока нечего сказать: число правок, короткое «Сохранено» после записи, ошибка – надолго.
   let quietTimer = null;
   function restStatus() {
+    if (live) {
+      const w = items.filter((i) => i.taken).length, q = items.filter((i) => i.sent && !i.taken).length;
+      if (w || q) return setStatus("ok", [w && `Агент применяет ${w}`, q && `в очереди ${q}`].filter(Boolean).join(" · "));
+    }
     const n = items.filter(keep).length;
     setStatus(n ? "ok" : "idle", n ? `${n} ${plural(n)}` : "");
   }
@@ -1397,8 +1518,10 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     closed = list;
     if (!gone.length) return;
     items = items.filter((i) => !ids.has(i.id));
-    paint(); renderCards();
-    toast(`Агент закрыл ${gone.length} ${plural(gone.length)}`);
+    paint(); renderCards(); restStatus();
+    const one = gone.length === 1 && list.find((c) => c.id === gone[0].id);
+    toast(!one ? `Агент закрыл ${gone.length} ${plural(gone.length)}`
+      : one.state === "applied" ? "Агент применил правку" : `Агент отклонил правку${one.note ? ": " + one.note : ""}`);
   }
   function plural(n) {
     const m10 = n % 10, m100 = n % 100;
@@ -1445,10 +1568,11 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
   };
   $("#retry").onclick = () => { scheduleSave(); };
 
-  // «Готово» необратимо: сервер закрывается и правки уходят агенту. Поэтому только кликом и с подтверждением, без горячей клавиши.
+  // «Завершить ревью» необратимо: сервер закрывается и правки уходят агенту. Поэтому только кликом и с подтверждением, без горячей клавиши.
   async function askDone(on) {
-    const n = items.filter(keep).length;
-    $("#confirm-text").textContent = n ? `Отправить агенту ${n} ${plural(n)}? Редактор закроется.` : "Правок нет. Закрыть редактор?";
+    // забранные в Live Edit агент доделает сам, в пачку при завершении они не идут
+    const n = items.filter((i) => keep(i) && !i.taken).length;
+    $("#confirm-text").textContent = n ? `Отправить агенту ${n} ${plural(n)} и завершить ревью? Редактор закроется.` : "Завершить ревью? Редактор закроется.";
     const show = on ? $("#confirm") : $("#bottom"), hide = on ? $("#bottom") : $("#confirm");
     hide.hidden = true; show.hidden = false;
     anim(show, { opacity: [0, 1], y: [6, 0] }, { duration: 0.18 });
@@ -1577,6 +1701,8 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     if (MODE === "md" && review.view) setView(review.view, false);
     items = review.items.filter((i) => (i.state || "pending") === "pending");
     closed = review.items.filter((i) => (i.state || "pending") !== "pending");
+    docSha = doc.sha;
+    setLive(!!review.live, false);
     ready = true;
     allRoots().forEach(anchorRoot);
     panelOpen = false;
@@ -1584,7 +1710,13 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     paint(); renderCards();
     if (registerAuto) applyAutoRegister();
     syncRegisterUI();
-    if (items.length) setStatus("ok", `${items.length} ${plural(items.length)} с прошлого раза`); else restStatus();
+    if (items.length && !live) setStatus("ok", `${items.length} ${plural(items.length)} с прошлого раза`); else restStatus();
+    // HTML перезагрузился после правки агента в Live Edit – вернуть, где читал
+    try {
+      const sc = JSON.parse(sessionStorage.getItem("revizor-scroll") || "null");
+      sessionStorage.removeItem("revizor-scroll");
+      if (sc) { scrollTo(sc.x, sc.y); $("#cards").scrollTop = sc.c; }
+    } catch (e) {}
     if (!(window.CSS && CSS.highlights)) toast("Браузер без CSS Highlight API: правки сохраняются, подсветки не будет");
   })();
 })();

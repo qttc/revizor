@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """revizor – локальный редактор правок: человек правит документ в браузере, агент забирает правки.
 
-    revizor.py open FILE [--port N] [--no-browser]   сервер до кнопки «Готово», потом сводка в stdout
+    revizor.py open FILE [--port N] [--no-browser]   сервер до «Завершить ревью», потом сводка в stdout
                                                     FILE – .md/.markdown/.txt или .html/.htm
     revizor.py show FILE [--json]                     правки, которые ждут агента
     revizor.py mark FILE ID... --state applied|rejected [--note TEXT]
+    revizor.py wait FILE                              Live Edit: ждать отправленные правки, забрать их и вывести сводку
     revizor.py update [--check [--force]]            обновиться из репо (git pull) и показать, что поменялось
 
 Правки лежат рядом с документом: report.md → report.review.json. Формат – в docs/technical.md.
@@ -12,6 +13,8 @@
 Только stdlib, Python 3.9+.
 """
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import html
 import json
@@ -28,7 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -171,6 +174,22 @@ def pending(review: dict) -> list:
     return [i for i in review["items"] if i.get("state", "pending") == "pending"]
 
 
+LOCKS = Path.home() / ".cache" / "revizor" / "locks"
+
+
+@contextlib.contextmanager
+def locked(doc: Path):
+    """Файл правок пишут сервер, `mark` и `wait` – разные процессы. Чтение-изменение-запись идёт под блокировкой,
+    иначе Live Edit теряет отметку «агент забрал» между сохранениями страницы. Лок лежит в кэше, а не рядом с документом."""
+    LOCKS.mkdir(parents=True, exist_ok=True)
+    with open(LOCKS / (sha(str(doc.resolve())) + ".lock"), "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def show_text(s: str, doc: Path) -> str:
     """Для сводки: в HTML переносы и отступы вёрстки – шум, в тексте перенос виден как ⏎."""
     if kind(doc) == "html":
@@ -189,9 +208,14 @@ def line_of(doc: Path, item: dict):
     return text.count("\n", 0, start) + 1 if start >= 0 else None
 
 
-def summary(doc: Path, review: dict) -> str:
-    items = pending(review)
-    out = [f"Правки к {doc}: {len(items)} ждут агента. Файл: {sidecar(doc)}"]
+def summary(doc: Path, review: dict, items=None, head=None) -> str:
+    if items is None:
+        # правки, которые уже забрал `wait`, агент применяет в цикле Live Edit – второй раз их не выдавать
+        items = [i for i in pending(review) if not i.get("taken")]
+    out = [head or f"Правки к {doc}: {len(items)} ждут агента. Файл: {sidecar(doc)}"]
+    busy = [i["id"] for i in pending(review) if i.get("taken")]
+    if busy and head is None:
+        out.append(f"Ещё применяются в Live Edit: {', '.join(busy)}")
     if review.get("register"):
         out.append(f"Регистр: {review['register']}")
     if items and is_bundle(doc):
@@ -374,6 +398,9 @@ def make_handler(doc: Path, done: threading.Event, update=None):
                 if doc.parent not in f.parents or not f.is_file() or f.name.endswith(".review.json"):
                     return self.send(404, b"not found", "text/plain")
                 self.send(200, f.read_bytes(), mimetypes.guess_type(f.name)[0] or "application/octet-stream")
+            elif path == "/api/source" and kind(doc) != "html":
+                # Live Edit: агент поменял текст – страница перерисовывает его на месте, без перезагрузки
+                self.send(200, doc.read_text(encoding="utf-8").encode("utf-8"), "text/plain; charset=utf-8")
             elif path == "/api/state":
                 text = doc.read_text(encoding="utf-8")
                 with lock:
@@ -388,15 +415,19 @@ def make_handler(doc: Path, done: threading.Event, update=None):
             if path not in ("/api/review", "/api/done"):
                 return self.send(404, b"not found", "text/plain")
             body = self.read_json()
-            with lock:
+            with lock, locked(doc):
                 review = load(doc)
                 # Страница присылает только живые правки; применённые и отклонённые хранит файл.
                 # Агент мог закрыть правку, пока вкладка открыта: такую страница больше не воскрешает.
                 closed = [i for i in review["items"] if i.get("state", "pending") != "pending"]
                 closed_ids = {i["id"] for i in closed}
-                live = [dict(i, state="pending") for i in body.get("items", [])
+                # Правку, которую агент уже забрал в Live Edit, страница не меняет и не удаляет: он применяет её прямо сейчас.
+                taken = {i["id"]: i for i in review["items"] if i.get("state", "pending") == "pending" and i.get("taken")}
+                live = [taken.pop(i["id"], None) or dict(i, state="pending") for i in body.get("items", [])
                         if i.get("state", "pending") == "pending" and i.get("id") not in closed_ids]
-                review["items"] = closed + live
+                review["items"] = closed + live + list(taken.values())
+                if "live" in body:
+                    review["live"] = bool(body["live"])
                 review["register"] = body.get("register")
                 review["register_auto"] = bool(body.get("register_auto"))
                 if body.get("view") in ("md", "plain"):
@@ -442,7 +473,11 @@ def cmd_open(args) -> int:
         done.wait()
     except KeyboardInterrupt:
         server.shutdown()
-        print("Остановлено без «Готово». Правки, что успели сохраниться, в " + str(sidecar(doc)), file=sys.stderr)
+        with locked(doc):
+            review = load(doc)
+            review["status"] = "stopped"  # `wait` в Live Edit видит это и заканчивает цикл
+            save(doc, review)
+        print("Остановлено без «Завершить ревью». Правки, что успели сохраниться, в " + str(sidecar(doc)), file=sys.stderr)
         return 130
     server.shutdown()
     print(summary(doc, load(doc)))
@@ -461,26 +496,61 @@ def cmd_show(args) -> int:
 
 def cmd_mark(args) -> int:
     doc = Path(args.file).expanduser().resolve()
-    review = load(doc)
-    known = {i["id"]: i for i in review["items"]}
-    missing = [i for i in args.ids if i not in known]
-    if missing:
-        sys.exit(f"нет правок с id: {', '.join(missing)}")
-    for i in args.ids:
-        known[i]["state"] = args.state
-        known[i]["resolved"] = now()
-        if args.note:
-            known[i]["note"] = args.note
-    save(doc, review)
+    with locked(doc):
+        review = load(doc)
+        known = {i["id"]: i for i in review["items"]}
+        missing = [i for i in args.ids if i not in known]
+        if missing:
+            sys.exit(f"нет правок с id: {', '.join(missing)}")
+        for i in args.ids:
+            known[i]["state"] = args.state
+            known[i]["resolved"] = now()
+            if args.note:
+                known[i]["note"] = args.note
+        save(doc, review)
     print(f"{len(args.ids)} → {args.state}. Ждут агента: {len(pending(review))}")
     return 0
+
+
+def take_sent(doc: Path):
+    """Забрать отправленные правки: пометить `taken` и вернуть их. None – ревью закончено, цикл пора остановить."""
+    with locked(doc):
+        if not sidecar(doc).exists():
+            return [], None
+        review = load(doc)
+        if review.get("status") != "open":
+            return None
+        fresh = [i for i in pending(review) if i.get("sent") and not i.get("taken")]
+        for i in fresh:
+            i["taken"] = now()
+        if fresh:
+            save(doc, review)
+        return fresh, review
+
+
+def cmd_wait(args) -> int:
+    """Live Edit: ждёт, пока владелец отправит правку из редактора, и выходит со сводкой. Агент применяет, отмечает
+    и запускает `wait` снова. Ревью закончено или сервер остановлен – выход без правок, цикл заканчивается."""
+    doc = Path(args.file).expanduser().resolve()
+    while True:
+        got = take_sent(doc)
+        if got is None:
+            print(f"Ревью {doc.name} завершено, Live Edit остановлен. Оставшиеся правки – в выводе open.")
+            return 0
+        fresh, review = got
+        if fresh:
+            head = (f"Live Edit: {len(fresh)} {'правка' if len(fresh) == 1 else 'правки' if len(fresh) < 5 else 'правок'}"
+                    f" к {doc}. Применить, отметить mark и снова запустить wait в фоне.")
+            print(summary(doc, review, items=fresh, head=head), flush=True)
+            return 0
+        time.sleep(args.interval)
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"revizor {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("open", help="открыть документ в редакторе и ждать «Готово»")
+    p = sub.add_parser("open", help="открыть документ в редакторе и ждать «Завершить ревью»")
     p.add_argument("file")
     p.add_argument("--port", type=int)
     p.add_argument("--no-browser", action="store_true")
@@ -495,6 +565,10 @@ def main(argv=None) -> int:
     p.add_argument("--state", choices=["applied", "rejected"], required=True)
     p.add_argument("--note")
     p.set_defaults(fn=cmd_mark)
+    p = sub.add_parser("wait", help="Live Edit: ждать правку, отправленную из редактора, и вывести её")
+    p.add_argument("file")
+    p.add_argument("--interval", type=float, default=1.0)
+    p.set_defaults(fn=cmd_wait)
     p = sub.add_parser("update", help="обновить Ревизор из репо (git pull) и показать, что поменялось")
     p.add_argument("--check", action="store_true", help="только проверить, есть ли новая версия (кэш на сутки)")
     p.add_argument("--force", action="store_true", help="с --check: спросить репо сейчас, мимо кэша")

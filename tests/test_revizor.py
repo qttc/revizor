@@ -226,6 +226,63 @@ class CliTest(unittest.TestCase):
             self.run_cli("mark", str(self.doc), "zzz", "--state", "applied")
 
 
+
+class LiveEditTest(ServerTest.__base__):
+    """Live Edit: страница отправляет правку, `wait` её забирает, агент отмечает. Состояние общее – файл правок."""
+
+    setUp, tearDown, edit = ServerTest.setUp, ServerTest.tearDown, ServerTest.edit
+
+    def wait(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            revizor.main(["wait", str(self.doc), "--interval", "0.05"])
+        return buf.getvalue()
+
+    def test_wait_takes_only_sent_items(self):
+        post(self.base + "/api/review", {"live": True, "items": [dict(self.edit("a"), sent="2026-10-22T10:00:00Z"),
+                                                                  self.edit("b")]})
+        out = self.wait()
+        self.assertIn("Live Edit: 1 правка", out)
+        self.assertIn("[a]", out)
+        self.assertNotIn("[b]", out)
+        items = {i["id"]: i for i in revizor.load(self.doc)["items"]}
+        self.assertTrue(items["a"].get("taken"))
+        self.assertFalse(items["b"].get("taken"))
+        self.assertTrue(revizor.load(self.doc)["live"])
+
+    def test_page_cannot_change_or_drop_taken_item(self):
+        post(self.base + "/api/review", {"items": [dict(self.edit("a"), sent="t")]})
+        self.wait()
+        # страница ещё не узнала, что агент забрал правку: прислала её изменённой, а потом без неё
+        post(self.base + "/api/review", {"items": [dict(self.edit("a"), replacement="другое", sent="t")]})
+        post(self.base + "/api/review", {"items": []})
+        items = revizor.load(self.doc)["items"]
+        self.assertEqual([(i["id"], i["replacement"]) for i in items], [("a", "Конверсия +3 п.п.")])
+
+    def test_done_summary_skips_taken_items(self):
+        post(self.base + "/api/review", {"items": [dict(self.edit("a"), sent="t"), self.edit("b")]})
+        self.wait()
+        out = revizor.summary(self.doc, revizor.load(self.doc))
+        self.assertIn("1 ждут агента", out)
+        self.assertIn("Ещё применяются в Live Edit: a", out)
+        self.assertNotIn("[a]", out)
+
+    def test_wait_stops_when_review_finished(self):
+        post(self.base + "/api/done", {"items": [dict(self.edit("a"), sent="t")]})
+        self.assertIn("завершено", self.wait())
+        self.assertFalse(revizor.load(self.doc)["items"][0].get("taken"))
+
+    def test_source_endpoint_serves_current_text(self):
+        self.doc.write_text("# Новое\n", encoding="utf-8")
+        self.assertEqual(urllib.request.urlopen(self.base + "/api/source").read().decode(), "# Новое\n")
+
+    def test_overlay_has_live_ui(self):
+        js = urllib.request.urlopen(self.base + "/_revizor/overlay.js").read().decode()
+        for s in ("Live Edit", "Отправить агенту", "Агент применяет…", "Завершить ревью", "/api/source"):
+            self.assertIn(s, js)
+        self.assertNotIn(">Готово<", js)
+
+
 if __name__ == "__main__":
     unittest.main()
 
