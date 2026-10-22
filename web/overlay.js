@@ -10,7 +10,7 @@
   const MODE = ["text", "md"].includes(document.documentElement.dataset.revizorMode) ? document.documentElement.dataset.revizorMode : "html";
   const IS_TEXT = MODE !== "html"; // текст и Markdown: позиции правок – позиции в файле
   const SKIP = "script, style, noscript, template, textarea";
-  const REGISTERS = [["", "Определить сам"], ["report", "Отчёт"], ["deck", "Дек"], ["slack", "Slack"], ["spec", "Спека"],
+  const REGISTERS = [["", "Авто"], ["report", "Отчёт"], ["deck", "Дек"], ["slack", "Slack"], ["spec", "Спека"],
     ["doc", "Док"], ["email", "Письмо"], ["client", "Клиентская копия"], ["other", "Другое"]];
   const HL_CSS = `
     ::highlight(rv-edit) { background-color: rgba(255, 196, 0, .38); text-decoration: line-through 1.5px rgba(160, 100, 0, .9); }
@@ -583,10 +583,13 @@ button { cursor: pointer; }
   display: flex; flex-direction: column; overflow: hidden; }
 #panel[hidden], #pill[hidden], #confirm[hidden], #bottom[hidden], #toast[hidden], #tb[hidden], #cover[hidden], #box[hidden] { display: none; }
 
-header { padding: 20px 20px 0 22px; display: grid; grid-template-columns: 1fr auto; column-gap: 10px; align-items: start; }
-h1 { margin: 0; font: italic 700 34px/1 "${FONT}", "Playfair Display", Georgia, serif; letter-spacing: -.005em; }
-.tagline { margin-top: 6px; font: 400 15px/1.2 "${FONT}", "Playfair Display", Georgia, serif; color: var(--muted); letter-spacing: .01em; }
-.meta { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: .5px solid var(--hair); min-width: 0; }
+/* знак как на титуле: курсивное название и под ним мелкая разрядка капителью той же ширины */
+header { padding: 18px 16px 0 22px; display: grid; grid-template-columns: 1fr auto; column-gap: 10px; align-items: start; }
+.mark { display: inline-flex; flex-direction: column; align-items: stretch; justify-self: start; }
+h1 { margin: 0; font: italic 700 29px/1 "${FONT}", "Playfair Display", Georgia, serif; letter-spacing: -.01em; }
+.tagline { margin-top: 7px; display: flex; justify-content: space-between; font: 600 9.5px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  text-transform: uppercase; color: var(--muted); }
+.meta { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-top: 14px; min-width: 0; }
 .docname { flex: 1; min-width: 0; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .icon-btn { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 10px; background: transparent; color: var(--muted);
   transition: background .15s, color .15s; }
@@ -599,8 +602,7 @@ h1 { margin: 0; font: italic 700 34px/1 "${FONT}", "Playfair Display", Georgia, 
 .format select:hover { background: var(--fill-hover); }
 .format::after { content: ""; position: absolute; right: 8px; top: 9px; width: 5px; height: 5px; border-right: 1.5px solid var(--muted);
   border-bottom: 1.5px solid var(--muted); transform: rotate(45deg); pointer-events: none; }
-.auto { display: inline-flex; color: var(--comment); }
-.auto[hidden] { display: none; }
+
 
 /* добавить: две равные кнопки с полными названиями, отдельной группой под шапкой */
 .tools { padding: 12px 14px 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
@@ -723,20 +725,19 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
 @media (max-width: 760px) {
   /* снизу панель лежит прямо на тексте документа – подложка плотнее, чтобы строки под ней не спорили с карточками */
   #panel { top: auto; left: 8px; right: 8px; bottom: 8px; width: auto; height: 50vh; border-radius: 24px; background: var(--tint-strong); }
-  header { padding: 14px 16px 0 18px; } h1 { font-size: 26px; } .tagline { font-size: 13px; margin-top: 3px; }
-  .meta { margin-top: 10px; padding-top: 8px; } .tools { padding: 8px 12px; } .tools-label { display: none; }
+  header { padding: 14px 16px 0 18px; } h1 { font-size: 25px; } .tagline { margin-top: 5px; }
+  .meta { margin-top: 10px; } .tools { padding: 8px 12px; } .tools-label { display: none; }
   #toast { left: 16px !important; right: 16px; bottom: calc(50vh + 20px) !important; max-width: none; }
 }
 </style>
 <div class="p">
   <section id="panel" class="glass" aria-label="Ревизор – правки к документу">
     <header>
-      <div><h1>Ревизор</h1><div class="tagline">Стоп нейрослоп</div></div>
+      <div class="mark"><h1>Ревизор</h1><div class="tagline" aria-label="Стоп нейрослоп">${[..."стоп нейрослоп"].map((ch) => `<span>${ch === " " ? "&nbsp;" : ch}</span>`).join("")}</div></div>
       <button class="icon-btn" id="min" title="Свернуть панель" aria-label="Свернуть панель">${icon("collapse", 18)}</button>
       <div class="meta">
         <span class="docname" id="name">…</span>
         <label class="format" title="Формат текста. Попадает в стилевые пары вместе с правками">
-          <span class="auto" id="auto" title="Формат определён автоматически">${icon("auto", 14)}</span>
           <select id="reg" name="revizor-format" aria-label="Формат текста"></select>
         </label>
       </div>
@@ -792,7 +793,9 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
   syncTextMode();
   // фокус ушёл в поле панели – тулбар выделения больше не нужен
   sh.addEventListener("focusin", (e) => { if (!e.composedPath().some((n) => n.id === "tb")) hideToolbar(); });
-  $("#reg").innerHTML = REGISTERS.map(([v, t]) => `<option value="${v}">${t}</option>`).join("");
+  // Пояснение – заголовком группы внутри списка: зачем вообще выбирать формат.
+  $("#reg").innerHTML = `<optgroup label="Формат подбирает правила стиля для правок">${REGISTERS.map(([v, t]) => `<option value="${v}">${t}</option>`).join("")}</optgroup>`;
+  const regLabel = (v) => (REGISTERS.find(([k]) => k === v) || [, ""])[1];
 
   // Блик на кромке стекла идёт за курсором – так панель читается как материал, а не как плашка.
   for (const g of [$("#panel"), $("#pill")]) {
@@ -859,7 +862,12 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
     syncRegisterUI();
     scheduleSave();
   }
-  function syncRegisterUI() { $("#reg").value = register; $("#auto").hidden = !registerAuto || !register; }
+  // В авто список показывает «Авто · Отчёт»: видно и что формат определён сам, и какой.
+  function syncRegisterUI() {
+    const auto = $("#reg").querySelector('option[value=""]');
+    auto.textContent = registerAuto && register ? `Авто · ${regLabel(register)}` : "Авто";
+    $("#reg").value = registerAuto ? "" : register;
+  }
 
   // ---------- отрисовка ----------
 
@@ -1375,7 +1383,11 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
     scheduleSave();
   };
   $("#add-block").onclick = () => setBlockMode(!blockMode);
-  $("#reg").onchange = (e) => { register = e.target.value; registerAuto = !register; if (registerAuto) applyAutoRegister(); syncRegisterUI(); scheduleSave(); };
+  $("#reg").onchange = (e) => {
+    registerAuto = !e.target.value;
+    if (registerAuto) applyAutoRegister(); else register = e.target.value;
+    syncRegisterUI(); scheduleSave();
+  };
   $("#retry").onclick = () => { scheduleSave(); };
 
   // «Готово» необратимо: сервер закрывается и правки уходят агенту. Поэтому только кликом и с подтверждением, без горячей клавиши.
