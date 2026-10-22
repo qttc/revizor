@@ -1,0 +1,3 @@
+{ "name": "revizor-md-vendor", "private": true, "type": "module",
+  "dependencies": { "mdast-util-from-markdown": "2.0.2", "micromark-extension-gfm": "3.0.0", "mdast-util-gfm": "3.0.0" },
+  "devDependencies": { "esbuild": "0.25.10" } }
