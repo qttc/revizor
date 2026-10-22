@@ -510,10 +510,10 @@
   const LAT = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD";
   const hl = document.createElement("style");
   hl.textContent = HL_CSS + `
-    ${face("playfair-700-italic-cyrillic.woff2", 700, "italic", CYR)}
-    ${face("playfair-700-italic-latin.woff2", 700, "italic", LAT)}
-    ${face("playfair-400-cyrillic.woff2", 400, "normal", CYR)}
-    ${face("playfair-400-latin.woff2", 400, "normal", LAT)}
+    ${face("playfair-700-italic-cyrillic.woff2", "400 900", "italic", CYR)}
+    ${face("playfair-700-italic-latin.woff2", "400 900", "italic", LAT)}
+    ${face("playfair-roman-cyrillic.woff2", "400 900", "normal", CYR)}
+    ${face("playfair-roman-latin.woff2", "400 900", "normal", LAT)}
     html[data-revizor-panel="side"] { padding-right: 404px !important; }
     html[data-revizor-panel="sheet"] { padding-bottom: 52vh !important; }`;
 
@@ -541,7 +541,7 @@
   --ink: #141417; --muted: rgba(20, 20, 26, .66); --faint: rgba(20, 20, 26, .6);
   --hair: rgba(20, 20, 26, .1); --rim: rgba(255, 255, 255, .7); --rim-low: rgba(255, 255, 255, .18);
   --edit: #b07800; --edit-soft: rgba(214, 150, 0, .16); --comment: #2563d9; --comment-soft: rgba(37, 99, 217, .13);
-  --doc: #6a5acd; --danger: #c0352b; --ok: #1f8a4c; --ok-soft: rgba(31, 138, 76, .16);
+  --doc: #6a5acd; --danger: #c0352b; --ok: #1f8a4c; --ok-soft: rgba(31, 138, 76, .16); --pencil: #c8321f;
   --solid: #17171b; --solid-ink: #fbfbfc; --focus: #2563d9;
   --menu: rgba(24, 24, 28, .78); --menu-ink: #f7f7f8;
   --shadow: 0 30px 70px -20px rgba(20, 20, 40, .34), 0 8px 24px -10px rgba(20, 20, 40, .2);
@@ -554,7 +554,7 @@
   --ink: #f3f3f6; --muted: rgba(243, 243, 246, .7); --faint: rgba(243, 243, 246, .6);
   --hair: rgba(255, 255, 255, .1); --rim: rgba(255, 255, 255, .28); --rim-low: rgba(255, 255, 255, .06);
   --edit: #f0b43a; --edit-soft: rgba(240, 180, 58, .16); --comment: #7aa7ff; --comment-soft: rgba(122, 167, 255, .16);
-  --doc: #a99cff; --danger: #ff7a6e; --ok: #5fd08f; --ok-soft: rgba(95, 208, 143, .2);
+  --doc: #a99cff; --danger: #ff7a6e; --ok: #5fd08f; --ok-soft: rgba(95, 208, 143, .2); --pencil: #ff6a52;
   --solid: #f3f3f6; --solid-ink: #141417; --focus: #7aa7ff;
   --menu: rgba(52, 52, 60, .82); --menu-ink: #f7f7f8;
   --shadow: 0 30px 70px -20px rgba(0, 0, 0, .6), 0 8px 24px -10px rgba(0, 0, 0, .4);
@@ -584,11 +584,27 @@ button { cursor: pointer; }
 #panel[hidden], #pill[hidden], #confirm[hidden], #bottom[hidden], #toast[hidden], #tb[hidden], #cover[hidden], #box[hidden] { display: none; }
 
 /* знак как на титуле: курсивное название и под ним мелкая разрядка капителью той же ширины */
-header { padding: 18px 16px 0 22px; display: grid; grid-template-columns: 1fr auto; column-gap: 10px; align-items: start; }
-.mark { display: inline-flex; flex-direction: column; align-items: stretch; justify-self: start; }
-h1 { margin: 0; font: italic 700 29px/1 "${FONT}", "Playfair Display", Georgia, serif; letter-spacing: -.01em; }
-.tagline { margin-top: 7px; display: flex; justify-content: space-between; font: 600 9.5px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-  text-transform: uppercase; color: var(--muted); }
+header { padding: 44px 18px 0; display: grid; grid-template-columns: 1fr; }
+/* афиша XIX века, по которой прошёлся корректор: «Ъ» перечёркнут, «нейрослоп» вычеркнут, на полях «стоп» */
+.bill { grid-column: 1 / -1; text-align: center; padding: 0 8px; }
+.rule { height: 4px; border-top: 2px solid var(--ink); border-bottom: .75px solid var(--ink); opacity: .85; }
+.rule.low { transform: scaleY(-1); }
+h1 { margin: 10px 0 6px; font: 900 32px/1 "${FONT}", "Playfair Display", Georgia, serif; letter-spacing: .06em; text-transform: uppercase; }
+.yer { position: relative; display: inline-block; }
+.yer svg { position: absolute; left: -4px; top: -2px; width: calc(100% + 8px); height: calc(100% + 4px); overflow: visible; pointer-events: none; }
+.bill .sub { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 10px; font: italic 400 14px/1 "${FONT}", "Playfair Display", Georgia, serif; color: var(--muted); }
+.struck { position: relative; display: inline-block; }
+.struck svg { position: absolute; left: -4px; top: 3px; width: calc(100% + 8px); height: 14px; overflow: visible; }
+.note { display: inline-block; font: italic 700 15px/1 "${FONT}", "Playfair Display", Georgia, serif; color: var(--pencil); transform: rotate(-6deg) translateY(-2px); }
+.pen { fill: none; stroke: var(--pencil); stroke-linecap: round; stroke-linejoin: round; }
+/* корректор прочерчивает правку, когда панель открылась */
+.draw .pen { stroke-dasharray: 220; stroke-dashoffset: 220; animation: pen .5s cubic-bezier(.4, 0, .2, 1) forwards; }
+.draw .yer .pen { animation-delay: .35s; } .draw .struck .pen { animation-delay: .6s; }
+.draw .note { opacity: 0; animation: note .3s ease-out .95s forwards; }
+@keyframes pen { to { stroke-dashoffset: 0; } }
+@keyframes note { from { opacity: 0; transform: rotate(-6deg) translate(-4px, -2px); } to { opacity: 1; transform: rotate(-6deg) translateY(-2px); } }
+@media (prefers-reduced-motion: reduce) { .draw .pen { animation: none; stroke-dashoffset: 0; } .draw .note { animation: none; opacity: 1; } }
+#min { position: absolute; top: 12px; right: 12px; }
 .meta { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-top: 14px; min-width: 0; }
 .docname { flex: 1; min-width: 0; color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .icon-btn { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 10px; background: transparent; color: var(--muted);
@@ -691,7 +707,7 @@ footer { padding: 10px 16px 14px; }
 
 #pill { position: fixed; right: 18px; bottom: 18px; z-index: 2147483646; height: 44px; padding: 0 18px 0 16px; border-radius: 999px; border: 0;
   display: flex; align-items: center; gap: 10px; color: var(--ink); }
-#pill .t { font: italic 700 20px/1 "${FONT}", Georgia, serif; }
+#pill .t { font: 900 15px/1 "${FONT}", Georgia, serif; letter-spacing: .07em; text-transform: uppercase; }
 #pill .n { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--solid); color: var(--solid-ink); font-size: 11.5px;
   font-weight: 600; display: grid; place-items: center; }
 
@@ -719,13 +735,14 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
 .ghost.comment { background: var(--comment-soft); }
 #cover { position: fixed; inset: 0; z-index: 2147483647; display: grid; place-items: center; text-align: center;
   background: color-mix(in srgb, var(--tint) 60%, transparent); -webkit-backdrop-filter: blur(24px) saturate(160%); backdrop-filter: blur(24px) saturate(160%); }
-#cover h2 { margin: 0 0 10px; font: italic 700 46px/1 "${FONT}", Georgia, serif; }
+#cover h2 { margin: 0 0 12px; padding: 12px 6px; font: 900 40px/1 "${FONT}", Georgia, serif; letter-spacing: .07em; text-transform: uppercase;
+  border-top: 2px solid var(--ink); border-bottom: 2px solid var(--ink); }
 #cover p { margin: 0; color: var(--muted); font-size: 14px; }
 
 @media (max-width: 760px) {
   /* снизу панель лежит прямо на тексте документа – подложка плотнее, чтобы строки под ней не спорили с карточками */
   #panel { top: auto; left: 8px; right: 8px; bottom: 8px; width: auto; height: 50vh; border-radius: 24px; background: var(--tint-strong); }
-  header { padding: 14px 16px 0 18px; } h1 { font-size: 25px; } .tagline { margin-top: 5px; }
+  header { padding: 30px 14px 0 16px; } h1 { font-size: 27px; margin: 8px 0 5px; } #min { top: 6px; right: 8px; }
   .meta { margin-top: 10px; } .tools { padding: 8px 12px; } .tools-label { display: none; }
   #toast { left: 16px !important; right: 16px; bottom: calc(50vh + 20px) !important; max-width: none; }
 }
@@ -733,7 +750,12 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
 <div class="p">
   <section id="panel" class="glass" aria-label="Ревизор – правки к документу">
     <header>
-      <div class="mark"><h1>Ревизор</h1><div class="tagline" aria-label="Стоп нейрослоп">${[..."стоп нейрослоп"].map((ch) => `<span>${ch === " " ? "&nbsp;" : ch}</span>`).join("")}</div></div>
+      <div class="bill draw" aria-label="Ревизор. Стоп нейрослоп">
+        <div class="rule"></div>
+        <h1 aria-hidden="true">Ревизор<span class="yer">ъ<svg viewBox="0 0 30 40" preserveAspectRatio="none"><path class="pen" d="M4 33 C 11 24, 20 14, 27 5" stroke-width="1.6"/></svg></span></h1>
+        <div class="sub" aria-hidden="true"><span class="struck">нейрослоп<svg viewBox="0 0 100 14" preserveAspectRatio="none"><path class="pen" d="M1 8.5 C 20 6.5, 40 8.2, 60 6.8 S 88 6.2, 99 7.4" stroke-width="2.2"/></svg></span><span class="note">— стоп</span></div>
+        <div class="rule low"></div>
+      </div>
       <button class="icon-btn" id="min" title="Свернуть панель" aria-label="Свернуть панель">${icon("collapse", 18)}</button>
       <div class="meta">
         <span class="docname" id="name">…</span>
@@ -761,7 +783,7 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
       </div>
     </footer>
   </section>
-  <button id="pill" class="glass" hidden aria-label="Открыть панель правок"><span class="t">Ревизор</span><span class="n" id="pill-n">0</span></button>
+  <button id="pill" class="glass" hidden aria-label="Открыть панель правок"><span class="t">Ревизоръ</span><span class="n" id="pill-n">0</span></button>
   <div id="view" class="glass" role="radiogroup" aria-label="Вид документа" hidden>
     <button data-v="md" role="radio" aria-checked="false">Оформление</button><button data-v="plain" role="radio" aria-checked="false">Текст</button>
   </div>
