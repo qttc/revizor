@@ -5,7 +5,7 @@
                                                     FILE – .md/.markdown/.txt или .html/.htm
     revizor.py show FILE [--json]                     правки, которые ждут агента
     revizor.py mark FILE ID... --state applied|rejected [--note TEXT]
-    revizor.py update [--check]                      обновиться из репо (git pull) и показать, что поменялось
+    revizor.py update [--check [--force]]            обновиться из репо (git pull) и показать, что поменялось
 
 Правки лежат рядом с документом: report.md → report.review.json. Формат – в docs/technical.md.
 Проверка новой версии – раз в сутки при open, выключается REVIZOR_NO_UPDATE_CHECK=1.
@@ -28,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-__version__ = "0.3.1"
+__version__ = "0.3.2"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -294,7 +294,7 @@ def changelog_between(old: str, new: str) -> str:
 
 def cmd_update(args) -> int:
     if args.check:
-        info = check_update(force=True)
+        info = check_update(force=args.force)
         print(f"Доступна {info['latest']}, у тебя {info['current']}." if info else f"Последняя версия: {__version__}.")
         return 0
     git = lambda *a: subprocess.run(["git", "-C", str(ROOT), *a], capture_output=True, text=True)
@@ -496,7 +496,8 @@ def main(argv=None) -> int:
     p.add_argument("--note")
     p.set_defaults(fn=cmd_mark)
     p = sub.add_parser("update", help="обновить Ревизор из репо (git pull) и показать, что поменялось")
-    p.add_argument("--check", action="store_true", help="только проверить, есть ли новая версия")
+    p.add_argument("--check", action="store_true", help="только проверить, есть ли новая версия (кэш на сутки)")
+    p.add_argument("--force", action="store_true", help="с --check: спросить репо сейчас, мимо кэша")
     p.set_defaults(fn=cmd_update)
     args = ap.parse_args(argv)
     return args.fn(args)
