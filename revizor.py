@@ -28,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"

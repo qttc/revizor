@@ -69,6 +69,13 @@ class ServerTest(unittest.TestCase):
         self.assertIn("window.__revizorMotion=window.Motion", js)
         self.assertLess(js.index("__revizorMotion=window.Motion"), js.index("window.__revizor = true"))
 
+    def test_overlay_header_compacts_on_scroll(self):
+        js = urllib.request.urlopen(self.base + "/_revizor/overlay.js").read().decode()
+        self.assertIn("#panel.compact h1", js)
+        self.assertIn('cardsBox.addEventListener("scroll", syncCompact', js)
+        self.assertIn("Общий комментарий", js)
+        self.assertNotIn("Весь документ", js)
+
     def test_md_bundle_has_parser_only_for_markdown(self):
         js = urllib.request.urlopen(self.base + "/_revizor/overlay.js").read().decode()
         self.assertIn("window.__revizorMd=__revizorMd", js)
