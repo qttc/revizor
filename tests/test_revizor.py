@@ -59,6 +59,25 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(saved["items"][0]["replacement"], "Конверсия +3 п.п.")
         self.assertFalse(self.done.is_set())
 
+    def test_overlay_bundle_isolates_motion(self):
+        js = urllib.request.urlopen(self.base + "/_revizor/overlay.js").read().decode()
+        self.assertIn("var define,exports,module;var prev=window.Motion;", js)
+        self.assertIn("window.__revizorMotion=window.Motion", js)
+        self.assertLess(js.index("__revizorMotion=window.Motion"), js.index("window.__revizor = true"))
+
+    def test_fonts_served_and_vendor_locked(self):
+        r = urllib.request.urlopen(self.base + "/_revizor/vendor/playfair-700-italic-cyrillic.woff2")
+        self.assertEqual(r.headers["Content-Type"], "font/woff2")
+        self.assertEqual(r.read()[:4], b"wOF2")
+        for bad in ("/_revizor/vendor/motion.js", "/_revizor/vendor/..%2F..%2Frevizor.py", "/_revizor/vendor/nope.woff2"):
+            with self.assertRaises(urllib.error.HTTPError, msg=bad):
+                urllib.request.urlopen(self.base + bad)
+
+    def test_register_auto_saved(self):
+        post(self.base + "/api/review", {"register": "deck", "register_auto": True, "items": []})
+        saved = revizor.load(self.doc)
+        self.assertEqual((saved["register"], saved["register_auto"]), ("deck", True))
+
     def test_done_sets_status_and_event(self):
         post(self.base + "/api/done", {"items": [self.edit()]})
         self.assertTrue(self.done.wait(1))
