@@ -623,7 +623,7 @@ h1 { margin: 10px 0 6px; font: 900 32px/1 "${FONT}", "Playfair Display", Georgia
 /* добавить: две равные кнопки с полными названиями, отдельной группой под шапкой */
 .tools { padding: 12px 14px 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .tools-label { grid-column: 1 / -1; padding: 0 4px 2px; font-size: 12px; color: var(--muted); }
-.act { display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 12px; border-radius: 13px; border: 0; text-align: left;
+.act { display: flex; align-items: center; gap: 7px; height: 38px; padding: 0 10px; white-space: nowrap; border-radius: 13px; border: 0; text-align: left;
   background: var(--fill); box-shadow: inset 0 0 0 .5px var(--hair); color: var(--ink); font-size: 13px; font-weight: 500;
   transition: background .15s, box-shadow .15s, color .15s; }
 .act svg { flex: none; color: var(--muted); }
@@ -749,6 +749,19 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
   .meta { margin-top: 10px; } .tools { padding: 8px 12px; } .tools-label { display: none; }
   #toast { left: 16px !important; right: 16px; bottom: calc(50vh + 20px) !important; max-width: none; }
 }
+
+/* шапка сворачивается, когда список прокрутили: остаётся строка «РЕВИЗОРЪ», имя файла и формат.
+   Черты не прячутся через display, иначе карандаш прочертит их заново при каждом раскрытии */
+header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .28s cubic-bezier(.4, 0, .2, 1), margin .28s cubic-bezier(.4, 0, .2, 1),
+  font-size .28s cubic-bezier(.4, 0, .2, 1), max-height .28s cubic-bezier(.4, 0, .2, 1), opacity .2s ease-out, top .28s cubic-bezier(.4, 0, .2, 1); }
+.rule { max-height: 4px; } .bill .sub { max-height: 24px; } .tools-label { max-height: 20px; }
+#panel.compact header { padding-top: 12px; }
+#panel.compact .rule, #panel.compact .bill .sub, #panel.compact .tools-label { max-height: 0; margin: 0; padding: 0; opacity: 0; overflow: hidden; border-width: 0; }
+#panel.compact h1 { font-size: 17px; margin: 2px 0 0; cursor: pointer; }
+#panel.compact .meta { margin-top: 6px; }
+#panel.compact .tools { padding-top: 8px; }
+#panel.compact #min { top: 6px; }
+@media (prefers-reduced-motion: reduce) { header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: opacity .2s; } }
 </style>
 <div class="p">
   <section id="panel" class="glass" aria-label="Ревизор – правки к документу">
@@ -769,7 +782,7 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
     </header>
     <div class="tools" role="group" aria-labelledby="tools-label">
       <span class="tools-label" id="tools-label">Комментарий</span>
-      <button class="act" id="add-doc" title="Комментарий, который касается всего документа">${icon("note", 16)}Весь документ</button>
+      <button class="act" id="add-doc" title="Комментарий, который касается всего документа">${icon("note", 16)}Общий комментарий</button>
       <button class="act" id="add-block" aria-pressed="false" title="Кликни по слайду, графику или таблице на странице">${icon("block", 16)}<span>Выбрать блок</span></button>
     </div>
     <div id="cards" role="list" aria-label="Правки"></div>
@@ -928,7 +941,7 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
       e.innerHTML = `<b>Правок пока нет.</b><ol>
         <li>Выдели текст – появится «Изменить» и «Комментарий».</li>
         ${!canBlock() ? "" : MODE === "md" ? "<li>«Выбрать блок» – клик по абзацу, таблице или заголовку раздела.</li>" : "<li>«Выбрать блок» – клик по слайду, графику или таблице.</li>"}
-        <li>«Весь документ» – комментарий про документ целиком.</li></ol>
+        <li>«Общий комментарий» – про документ целиком.</li></ol>
         <p>Закончил – напиши агенту «поправь».</p>`;
       box.append(e);
     }
@@ -947,6 +960,7 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
       box.append(d);
     }
     $("#pill-n").textContent = String(items.length);
+    if (box.scrollTop <= 2) $("#panel").classList.remove("compact");
   }
 
   function card(it) {
@@ -955,7 +969,7 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
     c.className = `card ${it.scope === "doc" ? "doc" : it.kind}${lost ? " orphan" : ""}`;
     c.dataset.id = it.id;
     c.setAttribute("role", "listitem");
-    const kind = it.scope === "doc" ? "Весь документ" : it.scope === "block" ? "Блок" : it.kind === "edit" ? "Правка" : "Комментарий";
+    const kind = it.scope === "doc" ? "Общий комментарий" : it.scope === "block" ? "Блок" : it.kind === "edit" ? "Правка" : "Комментарий";
     c.innerHTML = `<div class="head"><span class="dot"></span><span class="kind"></span><span class="where"></span>
       <button class="icon-btn" title="Удалить" aria-label="Удалить правку">${icon("close", 14)}</button></div>`;
     c.querySelector(".kind").textContent = kind;
@@ -1487,6 +1501,16 @@ kbd { font: 600 10.5px/1 -apple-system, sans-serif; padding: 3px 5px; border-rad
   let fitTimer = null;
   const refit = () => { clearTimeout(fitTimer); fitTimer = setTimeout(() => { syncPanelAttr(); fit(); placeSheet(); }, 100); };
   window.addEventListener("resize", refit);
+  // шапка сворачивается при прокрутке списка. Сворачивается, только если список длиннее экономии на шапке,
+  // иначе выросший список упрётся в верх, шапка раскроется и начнёт дёргаться
+  const cardsBox = $("#cards"), panel = $("#panel");
+  const syncCompact = () => {
+    const top = cardsBox.scrollTop, room = cardsBox.scrollHeight - cardsBox.clientHeight;
+    if (!panel.classList.contains("compact")) { if (top > 24 && room > 140) panel.classList.add("compact"); }
+    else if (top <= 2) panel.classList.remove("compact");
+  };
+  cardsBox.addEventListener("scroll", syncCompact, { passive: true });
+  $(".bill").addEventListener("click", () => { if (panel.classList.contains("compact")) cardsBox.scrollTo({ top: 0, behavior: reduce.matches ? "auto" : "smooth" }); });
   $("#min").onclick = async () => { await setPanel(false); $("#pill").focus(); };
   $("#pill").onclick = async () => { await setPanel(true); $("#min").focus(); };
 
