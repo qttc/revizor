@@ -24,13 +24,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
 VENDOR = WEB / "vendor"
 JS = "text/javascript; charset=utf-8"
 TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
+MD_SUFFIXES = {".md", ".markdown"}
 HTML_SUFFIXES = {".html", ".htm"}
 ASSET_PREFIX = "/_revizor/"
 OVERLAY_TAG = f'<script src="{ASSET_PREFIX}overlay.js" defer></script>'
@@ -50,10 +51,12 @@ def sha(text: str) -> str:
 
 
 def kind(doc: Path) -> str:
-    return "html" if doc.suffix.lower() in HTML_SUFFIXES else "text"
+    """html – отдаётся как есть, md – Markdown с двумя видами, text – простой текст."""
+    suffix = doc.suffix.lower()
+    return "html" if suffix in HTML_SUFFIXES else "md" if suffix in MD_SUFFIXES else "text"
 
 
-def overlay_bundle() -> bytes:
+def overlay_bundle(with_md: bool = False) -> bytes:
     """Слой правок вместе с Motion. Motion – UMD: в обёртке он не видит AMD и CommonJS страницы
     и не перетирает её window.Motion, а слою достаётся как window.__revizorMotion."""
     motion = (VENDOR / "motion.js").read_text(encoding="utf-8")
@@ -62,6 +65,10 @@ def overlay_bundle() -> bytes:
         "\n;window.__revizorMotion=window.Motion;if(prev===undefined){try{delete window.Motion}catch(e){window.Motion=undefined}}"
         "else{window.Motion=prev}}).call(window);\n"
     )
+    if with_md:
+        # парсер Markdown (mdast + GFM) – в той же обёртке, слою достаётся как window.__revizorMd
+        md = (VENDOR / "mdast-gfm.js").read_text(encoding="utf-8")
+        wrapped += "(function(){var define,exports,module;\n" + md + "\n;window.__revizorMd=__revizorMd;}).call(window);\n"
     return (wrapped + (WEB / "overlay.js").read_text(encoding="utf-8")).encode("utf-8")
 
 
@@ -75,19 +82,60 @@ def inject(page: str) -> str:
     return page[:m[-1].start()] + OVERLAY_TAG + page[m[-1].start():] if m else page + OVERLAY_TAG
 
 
+MD_CSS = """
+#revizor-md { max-width: 72ch; margin: 0 auto; padding: 76px 28px 140px; font: 17px/1.65 Charter, "Iowan Old Style", Georgia, serif; }
+#revizor-md > :first-child { margin-top: 0; }
+#revizor-md h1, #revizor-md h2, #revizor-md h3, #revizor-md h4, #revizor-md h5, #revizor-md h6 {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif; line-height: 1.25; margin: 1.7em 0 .5em; text-wrap: balance; }
+#revizor-md h1 { font-size: 32px; font-weight: 750; letter-spacing: -.015em; }
+#revizor-md h2 { font-size: 24px; font-weight: 700; letter-spacing: -.01em; }
+#revizor-md h3 { font-size: 19px; font-weight: 650; }
+#revizor-md h4, #revizor-md h5, #revizor-md h6 { font-size: 16px; font-weight: 650; }
+#revizor-md p { margin: .8em 0; }
+#revizor-md a { color: var(--link); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+#revizor-md strong { font-weight: 700; }
+#revizor-md del { color: var(--muted); }
+#revizor-md code { font: .86em/1.4 ui-monospace, "SF Mono", Menlo, monospace; background: var(--tint); padding: .12em .38em; border-radius: 6px; }
+#revizor-md pre { background: var(--tint); border-radius: 14px; padding: 14px 18px; overflow-x: auto; margin: 1.1em 0; }
+#revizor-md pre code { background: none; padding: 0; font-size: 13.5px; line-height: 1.6; }
+#revizor-md blockquote { margin: 1em 0; padding: 0 0 0 18px; border-left: 2px solid var(--rule); color: var(--muted); }
+#revizor-md ul, #revizor-md ol { padding-left: 1.4em; margin: .7em 0; }
+#revizor-md li { margin: .12em 0; }
+#revizor-md li > ul, #revizor-md li > ol { margin: .15em 0; }
+#revizor-md li > p { margin: .3em 0; }
+#revizor-md li.task { list-style: none; margin-left: -1.3em; }
+#revizor-md li.task input { margin: 0 .55em 0 0; vertical-align: -.1em; accent-color: var(--link); }
+#revizor-md .table { overflow-x: auto; margin: 1.2em 0; }
+#revizor-md table { border-collapse: collapse; font: 14.5px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; min-width: 60%; }
+#revizor-md th, #revizor-md td { padding: 8px 14px 8px 0; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
+#revizor-md th { font-weight: 650; border-bottom-color: var(--ink); }
+#revizor-md hr { border: 0; height: 1px; background: var(--rule); margin: 2.2em 0; }
+#revizor-md img { max-width: 100%; border-radius: 10px; }
+#revizor-md .raw { color: var(--muted); font: 13.5px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; }
+#revizor-md .fn { font-size: 14.5px; color: var(--muted); }
+html[data-revizor-view="md"] #revizor-root, html[data-revizor-view="plain"] #revizor-md { display: none; }
+html[data-revizor-mode="md"] #revizor-root { padding-top: 76px; }
+"""
+
+
 def text_shell(doc: Path) -> str:
-    """Текстовый документ как страница: текст в #revizor-root байт в байт, слой правок поверх."""
+    """Текстовый документ как страница. #revizor-root – текст байт в байт (вид «Текст»). У Markdown рядом #revizor-md,
+    его заполняет слой правок (вид «Оформление»); <base> нужен, чтобы картинки по относительным путям шли из папки документа."""
     body = html.escape(doc.read_text(encoding="utf-8"), quote=False)
+    md = kind(doc) == "md"
     return f"""<!doctype html>
-<html lang="ru" data-revizor-mode="text"><head><meta charset="utf-8">
+<html lang="ru" data-revizor-mode="{"md" if md else "text"}"{' data-revizor-view="md"' if md else ""}><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>{html.escape(doc.name)} · Revizor</title>
+{'<base href="/doc/">' if md else ""}
 <style>
-:root {{ --bg: #f6f5f1; --ink: #1d1c1a; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --bg: #161614; --ink: #ecebe6; }} }}
+:root {{ --bg: #f6f5f1; --ink: #1d1c1a; --muted: #5f5c56; --rule: #dcd8ce; --tint: rgba(29, 28, 26, .055); --link: #2457c5; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg: #161614; --ink: #ecebe6; --muted: #a8a59d; --rule: #3a3833; --tint: rgba(236, 235, 230, .07); --link: #8db0ff; }} }}
 html, body {{ margin: 0; background: var(--bg); color: var(--ink); }}
+::selection {{ background: color-mix(in srgb, var(--link) 26%, transparent); }}
 #revizor-root {{ max-width: 72ch; margin: 0 auto; padding: 40px 24px 120px; white-space: pre-wrap; word-wrap: break-word;
   font: 16px/1.65 Charter, Georgia, serif; }}
-</style></head><body><main id="revizor-root">{body}</main>{OVERLAY_TAG}</body></html>
+{MD_CSS if md else ""}
+</style></head><body><main id="revizor-root">{body}</main>{'<article id="revizor-md"></article>' if md else ""}{OVERLAY_TAG}</body></html>
 """
 
 
@@ -126,6 +174,17 @@ def show_text(s: str, doc: Path) -> str:
     return s.replace("\n", "⏎")
 
 
+def line_of(doc: Path, item: dict):
+    """Номер строки правки в текстовом документе: агент открывает файл сразу на нужном месте."""
+    if kind(doc) == "html" or item.get("frame") or item.get("orphan"):
+        return None
+    text = doc.read_text(encoding="utf-8")
+    start = item.get("start")
+    if not isinstance(start, int) or text[start:start + len(item["quote"])] != item["quote"]:
+        start = text.find(item["quote"])
+    return text.count("\n", 0, start) + 1 if start >= 0 else None
+
+
 def summary(doc: Path, review: dict) -> str:
     items = pending(review)
     out = [f"Правки к {doc}: {len(items)} ждут агента. Файл: {sidecar(doc)}"]
@@ -143,11 +202,16 @@ def summary(doc: Path, review: dict) -> str:
             continue
         if i["scope"] == "block":
             out.append(f"[{i['id']}] комментарий к блоку{where}")
+            if i.get("lines"):
+                a, b = i["lines"]
+                out.append(f"  строки: {a}–{b}" if a != b else f"  строка: {a}")
             out.append(f"  блок: {i['selector']}")
             out.append(f"  текст блока: {i['snippet']}")
             out.append(f"  комментарий: {i['comment']}")
             continue
+        line = line_of(doc, i)
         out.append(f"[{i['id']}] {'правка' if i['kind'] == 'edit' else 'комментарий'}{where}"
+                   + (f" · строка {line}" if line else "")
                    + (" (место не найдено, документ менялся)" if i.get("orphan") else ""))
         ctx = show_text(f"…{i.get('prefix', '')}⟦{i['quote']}⟧{i.get('suffix', '')}…", doc)
         out.append(f"  контекст: {ctx}")
@@ -197,13 +261,13 @@ def make_handler(doc: Path, done: threading.Event):
         def do_GET(self):
             path = unquote(self.path.split("?")[0])
             if path == "/":
-                if kind(doc) == "text":
+                if kind(doc) != "html":
                     return self.send(200, text_shell(doc).encode("utf-8"), "text/html; charset=utf-8")
                 self.send_response(302)
                 self.send_header("Location", "/doc/" + quote(doc.name))
                 self.end_headers()
             elif path == ASSET_PREFIX + "overlay.js":
-                self.send(200, overlay_bundle(), JS)
+                self.send(200, overlay_bundle(with_md=kind(doc) == "md"), JS)
             elif path.startswith(ASSET_PREFIX + "vendor/") and re.fullmatch(r"[\w.-]+\.woff2", path.rsplit("/", 1)[-1]):
                 f = VENDOR / path.rsplit("/", 1)[-1]
                 if not f.is_file():
@@ -213,6 +277,10 @@ def make_handler(doc: Path, done: threading.Event):
                 # Отчёт и всё, что лежит рядом с ним: картинки, стили, скрипты по относительным путям.
                 f = (doc.parent / path[5:]).resolve()
                 if f == doc:
+                    if kind(doc) != "html":  # текст открывается только через обёртку на /
+                        self.send_response(302)
+                        self.send_header("Location", "/")
+                        return self.end_headers()
                     return self.send(200, inject(doc.read_text(encoding="utf-8")).encode("utf-8"), "text/html; charset=utf-8")
                 if doc.parent not in f.parents or not f.is_file() or f.name.endswith(".review.json"):
                     return self.send(404, b"not found", "text/plain")
@@ -242,6 +310,8 @@ def make_handler(doc: Path, done: threading.Event):
                 review["items"] = closed + live
                 review["register"] = body.get("register")
                 review["register_auto"] = bool(body.get("register_auto"))
+                if body.get("view") in ("md", "plain"):
+                    review["view"] = body["view"]  # вид Markdown – порт каждый раз новый, localStorage его не удержит
                 review["doc_sha"] = sha(doc.read_text(encoding="utf-8"))
                 review["status"] = "done" if path == "/api/done" else "open"
                 save(doc, review)
