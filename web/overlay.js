@@ -942,7 +942,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
         <li>Выдели текст – появится «Изменить» и «Комментарий».</li>
         ${!canBlock() ? "" : MODE === "md" ? "<li>«Выбрать блок» – клик по абзацу, таблице или заголовку раздела.</li>" : "<li>«Выбрать блок» – клик по слайду, графику или таблице.</li>"}
         <li>«Общий комментарий» – про документ целиком.</li></ol>
-        <p>Закончил – напиши агенту «поправь».</p>`;
+        <p>Закончил – жми «Готово», агент применит правки.</p>`;
       box.append(e);
     }
     for (const it of all) box.append(card(it));
@@ -1108,7 +1108,14 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     c.scrollIntoView({ block: "nearest", behavior: reduce.matches ? "auto" : "smooth" });
     if (!quiet) anim(c, { backgroundColor: ["rgba(255, 196, 0, .28)", getComputedStyle(c).backgroundColor] }, { duration: 0.9 })
       .then(() => { c.style.backgroundColor = ""; }); // иначе инлайн-фон перебьёт :hover
-    c.querySelector("textarea").focus({ preventScroll: true });
+    // курсор в конец поля: в правке там уже лежит исходный текст, и печатать надо после него
+    const ta = c.querySelector("textarea");
+    const put = () => {
+      if (!ta.isConnected || sh.activeElement === ta) return;
+      ta.focus({ preventScroll: true });
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    };
+    put(); requestAnimationFrame(put); // панель могла быть свёрнута, тогда поле видно только на следующем кадре
     return c;
   }
 
