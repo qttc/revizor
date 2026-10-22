@@ -14,7 +14,7 @@
     ["doc", "Док"], ["email", "Письмо"], ["client", "Клиентская копия"], ["other", "Другое"]];
   const HL_CSS = `
     ::highlight(rv-edit) { background-color: rgba(255, 196, 0, .38); text-decoration: line-through 1.5px rgba(160, 100, 0, .9); }
-    ::highlight(rv-comment) { background-color: rgba(70, 140, 255, .28); }
+    ::highlight(rv-comment) { background-color: rgba(255, 196, 0, .28); text-decoration: underline dotted 1.5px rgba(200, 130, 0, .95); text-underline-offset: 3px; }
     ::highlight(rv-flash) { background-color: rgba(255, 150, 0, .75); }
     html[data-revizor-block] * { cursor: crosshair !important; }`;
 
@@ -668,7 +668,7 @@ h1 { margin: 10px 0 6px; font: 900 32px/1 "${FONT}", "Playfair Display", Georgia
   transition: background .15s, color .15s; }
 #view button:hover { color: var(--ink); }
 #view button[aria-checked="true"] { background: var(--solid); color: var(--solid-ink); }
-.comment .quote { background: var(--comment-soft); }
+.comment .quote { background: var(--edit-soft); }
 textarea, input { width: 100%; border: 0; border-radius: 12px; padding: 8px 10px; background: var(--field); box-shadow: inset 0 0 0 .5px var(--hair);
   color: var(--ink); transition: box-shadow .15s, background .15s; }
 textarea { min-height: 62px; resize: vertical; line-height: 1.45; }
