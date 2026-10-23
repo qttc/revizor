@@ -656,6 +656,7 @@ h1 { margin: 10px 0 6px; font: 900 32px/1 "${FONT}", "Playfair Display", Georgia
 .edit .quote { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--edit) 70%, transparent); }
 .quote.diff { text-decoration: none; background: var(--fill); box-shadow: inset 0 0 0 .5px var(--hair); color: var(--ink); -webkit-line-clamp: 6; max-height: none; }
 .quote.diff del { color: var(--muted); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--edit) 80%, transparent); }
+.quote.diff.rewrite { white-space: pre-line; }
 .quote.diff ins { text-decoration: none; background: var(--ok-soft); color: var(--ink); border-radius: 4px; padding: 0 2px; }
 .preview { margin-top: 6px; padding: 7px 10px; border-radius: 12px; font-size: 13px; line-height: 1.5; box-shadow: inset 0 0 0 .5px var(--hair); }
 .preview[hidden] { display: none; }
@@ -784,6 +785,13 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
 .hit-why { font-size: 12px; line-height: 1.4; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hit-acts { display: flex; gap: 6px; margin-top: 6px; }
 .hit-acts .btn { height: 26px; padding: 0 11px; font-size: 12px; }
+.slop-src.busy { color: var(--ink); animation: pulse 1.1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .slop-src.busy { animation: none; } }
+.hit-new { margin-top: 5px; padding: 5px 8px; border-radius: 9px; font-size: 12.5px; line-height: 1.45; color: var(--ink); background: var(--ok-soft); }
+.hit-new::before { content: "→ "; color: var(--muted); }
+.hit-new.gone { color: var(--muted); font-style: italic; background: var(--fill); }
+.slop-empty { margin: 0 8px 8px; font-size: 12.5px; color: var(--muted); }
 .slop-more { margin: 2px 8px 4px; padding: 4px 0; border: 0; background: none; color: var(--muted); font-size: 12px; text-align: left; cursor: pointer; }
 .slop-more:hover { color: var(--ink); }
 
@@ -995,6 +1003,9 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
   // Правила – регулярки из скилла стиля владельца (сервер находит его сам) плюс базовые. Находки не сохраняются:
   // они считаются заново по тексту. В файл правок идут только «это не нейрослоп» и то, что владелец взял в работу.
   let RULES = [], styleSkill = null, dismissed = [], slopOn = true, slopOpen = true, slopMore = false;
+  // Смысловой проход: страница отдаёт текст, агент в цикле `wait` читает его по каталогу скилла и пишет находки с вариантом.
+  let findings = [], scan = null;
+  const scanBusy = () => !!scan && (scan.state === "requested" || scan.state === "taken");
   const hitsByRoot = new Map(); // ключ корня → { text, hits }
   const CYR_RX = /[а-яё]/i;
   function compileRules(list) {
@@ -1043,7 +1054,16 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       hitsByRoot.set(key, cache);
     }
     const busy = textItemsOf(r.key);
-    return cache.hits.filter((h) => !busy.some((i) => h.start < i.end && i.start < h.end) && !isDismissed(h));
+    const agent = [];
+    for (const f of findings) {
+      if ((f.frame || "") !== key) continue;
+      const c = { ...f }; anchor(idx, c);
+      if (c.orphan) continue;
+      agent.push({ k: `${key}|agent|${f.id}`, root: key, start: c.start, end: c.end, quote: c.quote, prefix: text.slice(Math.max(0, c.start - 16), c.start),
+        rule: { id: f.rule, title: f.title, why: f.why, rewrite: f.rewrite, agent: true } });
+    }
+    return [...cache.hits, ...agent].sort((a, b) => a.start - b.start)
+      .filter((h) => !busy.some((i) => h.start < i.end && i.start < h.end) && !isDismissed(h));
   }
   const isDismissed = (h) => dismissed.some((d) => d.rule === h.rule.id && d.quote === h.quote && h.prefix.endsWith(d.prefix || ""));
   function allHits() {
@@ -1085,10 +1105,12 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
   // Предложение с уже применёнными автоисправлениями (тире, запятая после «Однако»): переписывать остаётся только смысловое.
   function fixedText(g, text) {
     let out = text.slice(g.start, g.end);
+    let edge = Infinity; // находки агента бывают шире регулярок: внутри уже переписанного куска механику не трогаем
     for (const h of [...g.hits].sort((x, y) => y.start - x.start)) {
-      if (!h.rule.fix) continue;
       const a = h.start - g.start, b = h.end - g.start;
-      out = out.slice(0, a) + out.slice(a, b).replace(new RegExp(h.rule.fix[0], "u"), h.rule.fix[1]) + out.slice(b);
+      if (b > edge) continue;
+      if (typeof h.rule.rewrite === "string") { out = out.slice(0, a) + h.rule.rewrite + out.slice(b); edge = a; }
+      else if (h.rule.fix) out = out.slice(0, a) + out.slice(a, b).replace(new RegExp(h.rule.fix[0], "u"), h.rule.fix[1]) + out.slice(b);
     }
     return out;
   }
@@ -1103,7 +1125,8 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       rule: [...new Set(g.hits.map((h) => h.rule.id))].join(","), source: "radar" };
     if (g.r.key) it.frame = g.r.key;
     if (how === "agent") it.comment = "Переписать без нейрослопа: " + g.hits.map((h) => `${h.rule.title} – ${h.rule.why}`).filter((v, i, a) => a.indexOf(v) === i).join(" ");
-    else { it.replacement = draft(fixedText(g, text)); it.why = how === "fix" ? "" : titles.join(", "); }
+    else { it.replacement = draft(fixedText(g, text)); it.why = how === "edit" ? titles.join(", ") : ""; }
+    if (g.hits.some((h) => h.rule.agent)) it.source = "radar-agent";
     items.push(it);
     paint(); renderCards(); restStatus(); scheduleSave();
     focusCard(it.id);
@@ -1124,16 +1147,22 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     box.innerHTML = `<button class="slop-head" aria-expanded="${slopOpen}"><span class="slop-mark"></span><span class="slop-title"></span>
       <span class="slop-src"></span></button><div class="slop-list"></div>`;
     box.querySelector(".slop-title").textContent = `Нейрослоп · ${n} ${n % 10 === 1 && n % 100 !== 11 ? "место" : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? "места" : "мест"}`;
-    box.querySelector(".slop-src").textContent = styleSkill ? `правила: ${styleSkill.name}` : "базовые правила";
+    const src = box.querySelector(".slop-src");
+    const waited = scan && scan.state === "requested" && Date.now() - Date.parse(scan.requested) > 90000;
+    src.textContent = waited ? "смысловая проверка ждёт агента" : scanBusy() ? "агент читает…" : styleSkill ? `правила: ${styleSkill.name}` : "базовые правила";
+    src.classList.toggle("busy", scanBusy() && !waited);
     box.querySelector(".slop-head").onclick = () => { slopOpen = !slopOpen; renderCards(); };
     const list = box.querySelector(".slop-list");
     const shown = slopMore ? groups : groups.slice(0, 5);
     for (const g of shown) {
-      const text = index(g.r).text, allFix = g.hits.every((h) => h.rule.fix);
+      const hasNew = (h) => typeof h.rule.rewrite === "string";
+      const text = index(g.r).text, allFix = g.hits.every((h) => h.rule.fix || hasNew(h)), byAgent = g.hits.some(hasNew);
       const row = document.createElement("div"); row.className = "hit"; row.dataset.k = g.k;
       row.innerHTML = `<div class="hit-head"><span class="hit-rule"></span><button class="icon-btn" title="Это не нейрослоп" aria-label="Это не нейрослоп">${icon("close", 13)}</button></div>
         <button class="hit-quote" title="Показать в документе"></button><div class="hit-why"></div>
-        <div class="hit-acts"><button class="btn sm solid" data-a="${allFix ? "fix" : "edit"}">${allFix ? "Исправить" : "Переписать"}</button><button class="btn sm" data-a="agent">Агенту</button></div>`;
+        <div class="hit-new" hidden></div>
+        <div class="hit-acts"><button class="btn sm solid" data-a="${allFix ? "fix" : "edit"}">${allFix ? (byAgent ? "Принять" : "Исправить") : "Переписать"}</button>${allFix && byAgent ? `<button class="btn sm" data-a="edit">Поправить</button>` : `<button class="btn sm" data-a="agent">Агенту</button>`}</div>`;
+      if (byAgent) { const nw = row.querySelector(".hit-new"), v = squash(fixedText(g, text)).trim(); nw.hidden = false; nw.textContent = v || "удалить предложение"; nw.classList.toggle("gone", !v); }
       const uniq = g.hits.filter((h, i, a) => a.findIndex((x) => x.rule.id === h.rule.id) === i);
       row.querySelector(".hit-rule").textContent = uniq.map((h) => h.rule.title).join(" · ");
       const why = row.querySelector(".hit-why");
@@ -1160,7 +1189,25 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       more.onclick = () => { slopMore = true; renderCards(); };
       list.append(more);
     }
+    if (!groups.length) {
+      const e = document.createElement("p"); e.className = "slop-empty";
+      e.textContent = scanBusy() ? "Механика чистая. Агент дочитывает текст." : "Нейрослопа не нашлось.";
+      list.append(e);
+    }
+    if (scan && scan.state === "done" && scan.sha && docSha && scan.sha !== docSha) {
+      const again = document.createElement("button"); again.className = "slop-more"; again.textContent = "Текст поменялся – проверить заново";
+      again.onclick = () => requestScan();
+      list.append(again);
+    }
     return box;
+  }
+  async function requestScan() {
+    const roots = allRoots().map((r) => ({ key: r.key || "", label: r.label || "", text: index(r).text })).filter((r) => r.text.trim());
+    if (!roots.length) return;
+    try {
+      const res = await (await fetch("/api/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roots }) })).json();
+      if (res.scan) { scan = res.scan; syncPolling(); renderCards(); }
+    } catch (e) { /* без сервера проверки нет, регулярки работают */ }
   }
   function hitAtPoint(r, x, y) {
     let node, off;
@@ -1204,7 +1251,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       box.append(e);
     }
     const hits = slopOn ? allHits() : [];
-    if (hits.length) box.append(slopSection(groupHits(hits)));
+    if (hits.length || scan) box.append(slopSection(groupHits(hits)));
     for (const it of all) box.append(card(it));
     if (closed.length) {
       const d = document.createElement("details");
@@ -1321,11 +1368,15 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     $("#live-hint").textContent = on ? "правки уходят по одной" : "";
     // выключили – неотправленное агенту остаётся черновиком; то, что он уже забрал, он доделает
     if (!on) for (const it of items) if (!it.taken) delete it.sent;
-    clearInterval(pollTimer);
-    if (on) pollTimer = setInterval(poll, 1500);
+    syncPolling();
     if (ready) { renderCards(); restStatus(); if (save) scheduleSave(); }
   }
   $("#live").onchange = (e) => setLive(e.target.checked);
+  function syncPolling() {
+    const need = live || scanBusy();
+    if (need && !pollTimer) pollTimer = setInterval(poll, 1500);
+    if (!need && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
 
   async function poll() {
     let st;
@@ -1337,6 +1388,12 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       if (f && f.taken && !it.taken) { it.taken = f.taken; changed = true; }
     }
     syncClosed(st.review.items.filter((i) => (i.state || "pending") !== "pending"));
+    const sc = st.review.scan || null;
+    if (JSON.stringify(sc) !== JSON.stringify(scan)) {
+      scan = sc;
+      if (scan && scan.state === "done") findings = st.review.findings || [];
+      paint(); changed = true; syncPolling();
+    }
     const stale = items.filter(isStale).map((i) => i.id).join();
     if (stale !== lastStale) { lastStale = stale; changed = true; }
     if (changed) { renderCards(); restStatus(); }
@@ -1371,7 +1428,13 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     const before = clean(it.quote, 1e6), after = clean(it.replacement || "", 1e6);
     if (it.kind !== "edit" || !after || before === after) { q.textContent = clean(it.quote, 300); return; }
     q.classList.add("diff");
-    for (const [op, text] of wordDiff(before, after)) {
+    let ops = wordDiff(before, after);
+    // Переписано почти целиком – пословный дифф превращается в кашу. Тогда «было» целиком, под ним «стало».
+    const words = (t) => t.split(/\s+/).filter(Boolean).length;
+    const same = ops.filter(([op]) => op === "=").reduce((n, [, t]) => n + words(t), 0);
+    if (same < Math.max(words(before), words(after)) / 3) ops = [["-", before], ["=", "\n"], ["+", after]];
+    q.classList.toggle("rewrite", ops.length === 3 && ops[1][1] === "\n");
+    for (const [op, text] of ops) {
       if (op === "=") { q.append(text); continue; }
       const sp = document.createElement(op === "-" ? "del" : "ins"); sp.textContent = text; q.append(sp);
     }
@@ -1924,6 +1987,8 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     closed = review.items.filter((i) => (i.state || "pending") !== "pending");
     docSha = doc.sha;
     dismissed = Array.isArray(review.dismissed) ? review.dismissed : [];
+    findings = Array.isArray(review.findings) ? review.findings : [];
+    scan = review.scan || null;
     try { const rl = await (await fetch("/api/rules")).json(); styleSkill = rl.skill; compileRules(rl.rules || []); } catch (e) { /* без правил редактор работает как раньше */ }
     setLive(!!review.live, false);
     ready = true;
@@ -1940,6 +2005,8 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       sessionStorage.removeItem("revizor-scroll");
       if (sc) { scrollTo(sc.x, sc.y); $("#cards").scrollTop = sc.c; }
     } catch (e) {}
+    // Смысловая проверка сама: при первом открытии и когда текст поменялся с прошлой проверки. Фреймы слайдов успевают загрузиться.
+    if (!scan || (scan.sha !== doc.sha && !scanBusy())) setTimeout(requestScan, 1500); else syncPolling();
     if (!(window.CSS && CSS.highlights)) toast("Браузер без CSS Highlight API: правки сохраняются, подсветки не будет");
   })();
 })();

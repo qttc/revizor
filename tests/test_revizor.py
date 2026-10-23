@@ -359,6 +359,68 @@ class RadarServerTest(ServerTest.__base__):
             self.assertIn(s, js)
 
 
+
+class SemanticScanTest(ServerTest.__base__):
+    """Смысловая проверка: страница просит, `wait` выдаёт задание, агент пишет находки через `suggest`."""
+
+    setUp, tearDown = ServerTest.setUp, ServerTest.tearDown
+
+    def setUpTexts(self):
+        self.saved_texts = revizor.TEXTS
+        revizor.TEXTS = Path(self.tmp.name) / "texts"
+
+    def cli(self, *argv):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            revizor.main(list(argv))
+        return buf.getvalue()
+
+    def request(self, text="# Итоги\n\nКонверсия выросла на фоне нового онбординга. Именно это и важно.\n"):
+        self.setUpTexts()
+        self.addCleanup(setattr, revizor, "TEXTS", self.saved_texts)
+        return post(self.base + "/api/scan", {"roots": [{"key": "", "text": text}]})
+
+    def test_scan_request_goes_to_wait_first(self):
+        self.assertEqual(self.request()["scan"]["state"], "requested")
+        post(self.base + "/api/review", {"items": [dict(ServerTest.edit(self), sent="t")]})
+        out = self.cli("wait", str(self.doc), "--interval", "0.05")
+        self.assertIn("Проверка на нейрослоп", out)
+        self.assertIn(str(revizor.text_cache(self.doc)), out)
+        self.assertEqual(revizor.load(self.doc)["scan"]["state"], "taken")
+        self.assertIn("Live Edit: 1 правка", self.cli("wait", str(self.doc), "--interval", "0.05"))
+
+    def test_suggest_anchors_quotes_and_reports_missing(self):
+        self.request()
+        f = Path(self.tmp.name) / "f.json"
+        f.write_text(json.dumps([
+            {"quote": "Именно это и важно.", "rewrite": "", "rule": "moral", "title": "Мораль", "why": "пересказ"},
+            {"quote": "нет такого", "rule": "x"},
+            {"quote": "Конверсия выросла", "rule": "y", "title": "Y"}]), encoding="utf-8")
+        out = self.cli("suggest", str(self.doc), str(f))
+        self.assertIn("Находок записано: 2", out)
+        self.assertIn("нет такого", out)
+        review = revizor.load(self.doc)
+        moral = review["findings"][0]
+        self.assertEqual(moral["rewrite"], "")
+        self.assertIsNone(review["findings"][1]["rewrite"])
+        self.assertEqual(moral["prefix"][-8:], "нбординга. "[-8:])
+        self.assertEqual(review["scan"]["state"], "done")
+
+    def test_page_save_keeps_findings_and_scan(self):
+        self.request()
+        f = Path(self.tmp.name) / "f.json"
+        f.write_text(json.dumps([{"quote": "Именно это и важно."}]), encoding="utf-8")
+        self.cli("suggest", str(self.doc), str(f))
+        post(self.base + "/api/review", {"items": []})
+        review = revizor.load(self.doc)
+        self.assertEqual(len(review["findings"]), 1)
+        self.assertEqual(review["scan"]["state"], "done")
+
+    def test_scan_needs_text(self):
+        with self.assertRaises(urllib.error.HTTPError):
+            post(self.base + "/api/scan", {"roots": []})
+
+
 if __name__ == "__main__":
     unittest.main()
 

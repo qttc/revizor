@@ -5,7 +5,8 @@
                                                     FILE – .md/.markdown/.txt или .html/.htm
     revizor.py show FILE [--json]                     правки, которые ждут агента
     revizor.py mark FILE ID... --state applied|rejected [--note TEXT]
-    revizor.py wait FILE                              Live Edit: ждать отправленные правки, забрать их и вывести сводку
+    revizor.py wait FILE                              ждать работу из редактора: правки Live Edit и проверку на нейрослоп
+    revizor.py suggest FILE FINDINGS.json            записать находки смысловой проверки на нейрослоп
     revizor.py update [--check [--force]]            обновиться из репо (git pull) и показать, что поменялось
     revizor.py style                                 какой скилл стиля нашёл Ревизор и сколько правил проверки
 
@@ -32,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -179,6 +180,12 @@ def pending(review: dict) -> list:
 
 
 LOCKS = Path.home() / ".cache" / "revizor" / "locks"
+TEXTS = Path.home() / ".cache" / "revizor" / "text"  # текст страницы для смысловой проверки: у бандла и HTML его видит только страница
+CTX = 32
+
+
+def text_cache(doc: Path) -> Path:
+    return TEXTS / (sha(str(doc.resolve())) + ".json")
 
 
 @contextlib.contextmanager
@@ -492,6 +499,8 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto"):
 
         def do_POST(self):
             path = self.path.split("?")[0]
+            if path == "/api/scan":
+                return self.request_scan(self.read_json())
             if path not in ("/api/review", "/api/done"):
                 return self.send(404, b"not found", "text/plain")
             body = self.read_json()
@@ -520,6 +529,21 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto"):
             self.send_json({"ok": True, "updated": review["updated"], "closed": closed})
             if path == "/api/done":
                 done.set()
+
+        def request_scan(self, body):
+            """Страница прислала свой текст: агент в цикле `wait` прочитает его и найдёт смысловые приметы нейрослопа."""
+            roots = [r for r in body.get("roots", []) if isinstance(r, dict) and isinstance(r.get("text"), str)]
+            if not roots:
+                return self.send_json({"ok": False, "error": "нет текста"}, 400)
+            TEXTS.mkdir(parents=True, exist_ok=True)
+            tmp = text_cache(doc).with_suffix(".tmp")
+            tmp.write_text(json.dumps({"doc": str(doc), "roots": roots}, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(text_cache(doc))
+            with lock, locked(doc):
+                review = load(doc)
+                review["scan"] = {"state": "requested", "requested": now(), "sha": sha(doc.read_text(encoding="utf-8"))}
+                save(doc, review)
+            self.send_json({"ok": True, "scan": review["scan"]})
 
     return Handler
 
@@ -595,19 +619,84 @@ def cmd_mark(args) -> int:
 
 
 def take_sent(doc: Path):
-    """Забрать отправленные правки: пометить `taken` и вернуть их. None – ревью закончено, цикл пора остановить."""
+    """Забрать работу: запрос проверки или отправленные правки, пометить взятыми и вернуть. None – ревью закончено."""
     with locked(doc):
         if not sidecar(doc).exists():
             return [], None
         review = load(doc)
         if review.get("status") != "open":
             return None
+        scan = review.get("scan") or {}
+        if scan.get("state") == "requested":
+            scan["state"], scan["taken"] = "taken", now()
+            save(doc, review)
+            return "scan", review
         fresh = [i for i in pending(review) if i.get("sent") and not i.get("taken")]
         for i in fresh:
             i["taken"] = now()
         if fresh:
             save(doc, review)
         return fresh, review
+
+
+def scan_task(doc: Path, review: dict) -> str:
+    """Задание агенту на смысловую проверку: где текст, по какому каталогу искать, что уже поймали регулярки."""
+    skill = find_style_skill()
+    catalog = None
+    if skill:
+        tells = sorted(Path(skill["path"]).glob("references/*tells-ru*.md")) or sorted(Path(skill["path"]).glob("references/*tells*.md"))
+        catalog = tells[0] if tells else None
+    catalog = catalog or RULES_DIR / "semantic-ru.md"
+    base = ", ".join(r["id"] for r in load_rules(skill)["rules"])
+    return "\n".join([
+        f"Проверка на нейрослоп: {doc}",
+        f"Текст страницы: {text_cache(doc)} (roots[].key – корень: \"\" страница, иначе фрейм слайда)",
+        f"Каталог примет: {catalog}" + (f" (скилл {skill['name']})" if skill else " (базовый Ревизора)"),
+        f"Регистр: {review.get('register') or 'определить по тексту'}",
+        f"Уже ловят регулярки, не повторять: {base}",
+        "Найти смысловые приметы по разделу «Проверка на нейрослоп» скилла revizor, записать: "
+        f"revizor.py suggest {doc} <findings.json>, потом снова запустить wait в фоне.",
+    ])
+
+
+def cmd_suggest(args) -> int:
+    """Находки агента → файл правок. Цитата обязана быть точной подстрокой текста страницы, иначе подсветить нечего."""
+    doc = Path(args.file).expanduser().resolve()
+    raw = sys.stdin.read() if args.findings == "-" else Path(args.findings).expanduser().read_text(encoding="utf-8")
+    found = json.loads(raw)
+    found = found.get("findings", []) if isinstance(found, dict) else found
+    cache = json.loads(text_cache(doc).read_text(encoding="utf-8")) if text_cache(doc).is_file() else {"roots": []}
+    roots = {r.get("key", ""): r["text"] for r in cache["roots"]}
+    if not roots and kind(doc) != "html":
+        roots = {"": doc.read_text(encoding="utf-8")}
+    out, missed, used = [], [], set()
+    for n, f in enumerate(found):
+        quote, key = (f.get("quote") or "").strip(), f.get("root", "")
+        text = roots.get(key)
+        pos = -1
+        if text and quote:
+            pos = text.find(quote)
+            while pos != -1 and (key, pos) in used:
+                pos = text.find(quote, pos + 1)
+        if pos == -1:
+            missed.append(quote[:40] or f"#{n}")
+            continue
+        used.add((key, pos))
+        item = {"id": f"f{n}", "quote": quote, "start": pos, "end": pos + len(quote),
+                "prefix": text[max(0, pos - CTX):pos], "suffix": text[pos + len(quote):pos + len(quote) + CTX],
+                "rule": f.get("rule") or "agent", "title": f.get("title") or "Нейрослоп", "why": f.get("why") or "",
+                "rewrite": f["rewrite"] if isinstance(f.get("rewrite"), str) else None}  # "" – удалить целиком, None – варианта нет
+        if key:
+            item["frame"] = key
+        out.append(item)
+    with locked(doc):
+        review = load(doc)
+        review["findings"] = out
+        scan = review.setdefault("scan", {})
+        scan.update({"state": "done", "done": now()})
+        save(doc, review)
+    print(f"Находок записано: {len(out)}." + (f" Не нашлись в тексте ({len(missed)}): {'; '.join(missed)}. Цитата – точная подстрока." if missed else ""))
+    return 0
 
 
 def cmd_wait(args) -> int:
@@ -620,6 +709,9 @@ def cmd_wait(args) -> int:
             print(f"Ревью {doc.name} завершено, Live Edit остановлен. Оставшиеся правки – в выводе open.")
             return 0
         fresh, review = got
+        if fresh == "scan":
+            print(scan_task(doc, review), flush=True)
+            return 0
         if fresh:
             head = (f"Live Edit: {len(fresh)} {'правка' if len(fresh) == 1 else 'правки' if len(fresh) < 5 else 'правок'}"
                     f" к {doc}. Применить, отметить mark и снова запустить wait в фоне.")
@@ -651,6 +743,10 @@ def main(argv=None) -> int:
     p.add_argument("file")
     p.add_argument("--interval", type=float, default=1.0)
     p.set_defaults(fn=cmd_wait)
+    p = sub.add_parser("suggest", help="записать находки смысловой проверки на нейрослоп")
+    p.add_argument("file")
+    p.add_argument("findings", help="JSON: [{quote, rewrite, rule, title, why, root}] или - для stdin")
+    p.set_defaults(fn=cmd_suggest)
     p = sub.add_parser("style", help="какой скилл стиля нашёл Ревизор")
     p.set_defaults(fn=cmd_style)
     p = sub.add_parser("update", help="обновить Ревизор из репо (git pull) и показать, что поменялось")
