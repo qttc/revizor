@@ -1,0 +1,4 @@
+{
+  "about": "Скилл стиля, который ведёт Ревизор (github.com/qttc/revizor).",
+  "files": {"examples": "references/examples.md", "catalog": "references/ai-tells-ru.md", "voice": "references/voice.md", "rules": "revizor-rules.json", "ledger": "revizor-learned.json"}
+}
