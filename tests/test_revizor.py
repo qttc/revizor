@@ -283,6 +283,82 @@ class LiveEditTest(ServerTest.__base__):
         self.assertNotIn(">Готово<", js)
 
 
+
+class StyleSkillTest(unittest.TestCase):
+    """Скилл стиля находится сам, без настройки: по revizor.json, каталогу примет или описанию в SKILL.md."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.skills = Path(self.tmp.name)
+        self.saved = (revizor.SKILLS_DIR, revizor.CONFIG, os.environ.pop("REVIZOR_STYLE_SKILL", None))
+        revizor.SKILLS_DIR, revizor.CONFIG = self.skills, self.skills / "no-config.json"
+
+    def tearDown(self):
+        revizor.SKILLS_DIR, revizor.CONFIG = self.saved[0], self.saved[1]
+        if self.saved[2] is not None:
+            os.environ["REVIZOR_STYLE_SKILL"] = self.saved[2]
+        self.tmp.cleanup()
+
+    def skill(self, name, skill_md="", files=()):
+        d = self.skills / name
+        (d / "references").mkdir(parents=True)
+        (d / "SKILL.md").write_text(skill_md, encoding="utf-8")
+        for f in files:
+            (d / f).write_text("", encoding="utf-8")
+        return d
+
+    def test_finds_skill_with_tells_catalog(self):
+        self.skill("deploy", "---\nname: deploy\n---")
+        self.skill("writing-style", "---\nname: writing-style\ndescription: канон стиля\n---", ["references/ai-tells-ru.md"])
+        self.assertEqual(revizor.find_style_skill()["name"], "writing-style")
+
+    def test_manifest_wins_and_nothing_found_is_none(self):
+        self.assertIsNone(revizor.find_style_skill())
+        self.skill("voice", "стиль", ["references/ai-tells-ru.md"])
+        self.skill("my-own", "", ["revizor.json"])
+        self.assertEqual(revizor.find_style_skill()["name"], "my-own")
+
+    def test_skill_rules_extend_replace_and_switch_off(self):
+        d = self.skill("writing-style", "стиль", ["references/ai-tells-ru.md"])
+        (d / "revizor-rules.json").write_text(json.dumps({"rules": [
+            {"id": "mine", "title": "Своё", "pattern": "x", "why": "y"},
+            {"id": "filler", "title": "Филлер по-моему", "pattern": "в целом", "why": "z"},
+            {"id": "em-dash", "off": True}]}), encoding="utf-8")
+        rules = {r["id"]: r for r in revizor.load_rules(revizor.find_style_skill())["rules"]}
+        self.assertEqual(rules["mine"]["source"], "writing-style")
+        self.assertEqual(rules["filler"]["title"], "Филлер по-моему")
+        self.assertNotIn("em-dash", rules)
+        self.assertEqual(rules["ne-pro"]["source"], "base")
+
+    def test_broken_skill_rules_fall_back_to_base(self):
+        d = self.skill("writing-style", "стиль", ["references/ai-tells-ru.md"])
+        (d / "revizor-rules.json").write_text("{не json", encoding="utf-8")
+        self.assertIn("ne-pro", {r["id"] for r in revizor.load_rules(revizor.find_style_skill())["rules"]})
+
+    def test_base_rules_are_complete(self):
+        for r in revizor.load_rules()["rules"]:
+            self.assertTrue(r["id"] and r["title"] and r["pattern"] and r["why"], r)
+
+
+class RadarServerTest(ServerTest.__base__):
+    setUp, tearDown, edit = ServerTest.setUp, ServerTest.tearDown, ServerTest.edit
+
+    def test_rules_endpoint_and_dismissed_persist(self):
+        data = json.loads(urllib.request.urlopen(self.base + "/api/rules").read())
+        self.assertIn("ne-pro", {r["id"] for r in data["rules"]})
+        post(self.base + "/api/review", {"items": [], "dismissed": [{"rule": "ne-pro", "quote": "не про", "prefix": "Это "}]})
+        self.assertEqual(revizor.load(self.doc)["dismissed"][0]["rule"], "ne-pro")
+
+    def test_summary_names_radar_rule(self):
+        post(self.base + "/api/review", {"items": [dict(self.edit("a"), rule="ne-pro,em-dash", source="radar")]})
+        self.assertIn("приём: ne-pro,em-dash", revizor.summary(self.doc, revizor.load(self.doc)))
+
+    def test_overlay_has_radar(self):
+        js = urllib.request.urlopen(self.base + "/_revizor/overlay.js").read().decode()
+        for s in ("rv-slop", "Нейрослоп", "Это не нейрослоп", "/api/rules"):
+            self.assertIn(s, js)
+
+
 if __name__ == "__main__":
     unittest.main()
 

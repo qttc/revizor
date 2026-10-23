@@ -16,6 +16,7 @@
     ::highlight(rv-edit) { background-color: rgba(255, 196, 0, .38); text-decoration: line-through 1.5px rgba(160, 100, 0, .9); }
     ::highlight(rv-comment) { background-color: rgba(255, 196, 0, .28); text-decoration: underline dotted 1.5px rgba(200, 130, 0, .95); text-underline-offset: 3px; }
     ::highlight(rv-flash) { background-color: rgba(255, 150, 0, .75); }
+    ::highlight(rv-slop) { text-decoration: underline wavy 1.5px rgba(214, 64, 40, .9); text-underline-offset: 3px; text-decoration-skip-ink: none; }
     html[data-revizor-block] * { cursor: crosshair !important; }`;
 
   let items = [];   // живые правки (state = pending)
@@ -763,6 +764,29 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
 #panel.compact #min { top: 6px; }
 @media (prefers-reduced-motion: reduce) { header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: opacity .2s; } }
 
+/* нейрослоп: красная карандашная волна в документе и группа находок над правками */
+.slop { border-radius: 18px; background: color-mix(in srgb, var(--pencil) 7%, transparent); box-shadow: inset 0 0 0 .5px color-mix(in srgb, var(--pencil) 30%, transparent); }
+.slop-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; border: 0; background: none; color: var(--ink); font-size: 13px; text-align: left; cursor: pointer; }
+.slop-mark { width: 14px; height: 6px; flex: none; background: radial-gradient(circle at 3px 3px, transparent 2px, var(--pencil) 2px 3px, transparent 3px) 0 0 / 6px 6px repeat-x; opacity: .9; }
+.slop-title { font-weight: 600; }
+.slop-src { flex: 1; text-align: right; color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slop-head::after { content: ""; flex: none; width: 5px; height: 5px; margin: 0 2px 3px 4px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(45deg); transition: transform .2s; }
+.slop:not(.open) .slop-head::after { transform: rotate(-45deg); }
+.slop:not(.open) .slop-list { display: none; }
+.slop-list { display: flex; flex-direction: column; gap: 2px; padding: 0 6px 6px; }
+.hit { padding: 8px 8px 9px; border-radius: 13px; transition: background .15s; }
+.hit:hover { background: var(--fill); }
+.hit-head { display: flex; align-items: center; gap: 6px; min-height: 22px; }
+.hit-rule { flex: 1; font-size: 12px; font-weight: 600; color: var(--pencil); }
+.hit .icon-btn { width: 24px; height: 24px; border-radius: 8px; margin: -2px -4px -2px 0; }
+.hit-quote { display: block; width: 100%; margin: 4px 0; padding: 0; border: 0; background: none; text-align: left; font: inherit; font-size: 12.5px; line-height: 1.45; color: var(--muted); cursor: pointer; }
+.hit-quote mark { background: none; color: var(--ink); text-decoration: underline wavy 1.2px var(--pencil); text-underline-offset: 3px; text-decoration-skip-ink: none; }
+.hit-why { font-size: 12px; line-height: 1.4; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hit-acts { display: flex; gap: 6px; margin-top: 6px; }
+.hit-acts .btn { height: 26px; padding: 0 11px; font-size: 12px; }
+.slop-more { margin: 2px 8px 4px; padding: 4px 0; border: 0; background: none; color: var(--muted); font-size: 12px; text-align: left; cursor: pointer; }
+.slop-more:hover { color: var(--ink); }
+
 /* Live Edit: переключатель в шапке, у карточки своя кнопка и состояние – видно, какая правка у агента, а какая ещё черновик */
 .live { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin-top: 6px; min-width: 0; font-size: 12.5px; color: var(--muted); }
 .live label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--ink); font-weight: 600; flex: none; }
@@ -961,7 +985,200 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       for (const it of textItemsOf(r.key)) (it.kind === "edit" ? edit : comment).add(rangeFor(r, idx, it.start, it.end));
       C.highlights.set("rv-edit", edit);
       C.highlights.set("rv-comment", comment);
+      const slop = new H();
+      for (const h of scanRoot(r, idx)) slop.add(rangeFor(r, idx, h.start, h.end));
+      C.highlights.set("rv-slop", slop);
     }
+  }
+
+  // ---------- проверка на нейрослоп ----------
+  // Правила – регулярки из скилла стиля владельца (сервер находит его сам) плюс базовые. Находки не сохраняются:
+  // они считаются заново по тексту. В файл правок идут только «это не нейрослоп» и то, что владелец взял в работу.
+  let RULES = [], styleSkill = null, dismissed = [], slopOn = true, slopOpen = true, slopMore = false;
+  const hitsByRoot = new Map(); // ключ корня → { text, hits }
+  const CYR_RX = /[а-яё]/i;
+  function compileRules(list) {
+    RULES = [];
+    for (const r of list) {
+      try { RULES.push({ ...r, rx: new RegExp(r.pattern, (r.flags || "g").includes("g") ? r.flags || "g" : (r.flags || "") + "g") }); }
+      catch (e) { /* правило с синтаксисом не для JS – пропустить, остальные работают */ }
+    }
+  }
+  // Где не искать: код, ссылки, короткие цитаты в «ёлочках» (это названный оборот, а не речь).
+  function quietZones(r, text) {
+    const z = [];
+    const add = (rx) => { for (const m of text.matchAll(rx)) z.push([m.index, m.index + m[0].length]); };
+    if (r === main && IS_TEXT) { add(/```[\s\S]*?(?:```|$)/g); add(/`[^`\n]+`/g); add(/\]\([^)]*\)/g); }
+    add(/https?:\/\/\S+/g);
+    add(/«[^»\n]{1,24}»/g);
+    return z;
+  }
+  function scanRoot(r, idx) {
+    if (!slopOn || !RULES.length) return [];
+    const key = r.key || "";
+    const text = idx.text;
+    let cache = hitsByRoot.get(key);
+    if (!cache || cache.text !== text) {
+      const zones = quietZones(r, text), hits = [];
+      for (const rule of RULES) {
+        rule.rx.lastIndex = 0;
+        for (const m of text.matchAll(rule.rx)) {
+          if (!m[0]) continue;
+          const start = m.index, end = start + m[0].length;
+          if (zones.some(([a, b]) => start < b && a < end)) continue;
+          if (rule.lang === "ru") {
+            const ls = text.lastIndexOf("\n", start) + 1, le = text.indexOf("\n", end);
+            if (!CYR_RX.test(text.slice(ls, le < 0 ? text.length : le))) continue;
+          }
+          if (!IS_TEXT || r !== main) { // в HTML код и кнопки не проверяем
+            const n = idx.nodes.find((x, i) => x.start <= start && (idx.nodes[i + 1] ? idx.nodes[i + 1].start > start : true));
+            if (n && n.node.parentElement && n.node.parentElement.closest("code, pre, kbd, button, nav")) continue;
+          }
+          hits.push({ k: `${key}|${rule.id}|${start}`, root: key, rule, start, end, quote: text.slice(start, end),
+            prefix: text.slice(Math.max(0, start - 16), start) });
+        }
+      }
+      hits.sort((a, b) => a.start - b.start);
+      cache = { text, hits };
+      hitsByRoot.set(key, cache);
+    }
+    const busy = textItemsOf(r.key);
+    return cache.hits.filter((h) => !busy.some((i) => h.start < i.end && i.start < h.end) && !isDismissed(h));
+  }
+  const isDismissed = (h) => dismissed.some((d) => d.rule === h.rule.id && d.quote === h.quote && h.prefix.endsWith(d.prefix || ""));
+  function allHits() {
+    const out = [];
+    for (const r of allRoots()) out.push(...scanRoot(r, index(r)).map((h) => ({ ...h, r })));
+    return out;
+  }
+  // Правка из находки берёт предложение целиком: «не про» без контекста не переписать.
+  function sentenceAround(text, start, end, lo = 0, hi = text.length) {
+    let a = start, b = end;
+    while (a > lo && !/[.!?\n]/.test(text[a - 1])) a--;
+    while (a < start && /\s/.test(text[a])) a++;
+    while (b < hi && !/[.!?\n]/.test(text[b])) b++;
+    if (b < hi && /[.!?]/.test(text[b])) b++;
+    return [a, b];
+  }
+  // В HTML текст соседних блоков в индексе идёт подряд: «Итоги» заголовка и «Это…» абзаца. Предложение не выходит за свой блок.
+  const BLOCK = "p, li, h1, h2, h3, h4, h5, h6, td, th, blockquote, figcaption, dd, dt, pre, div, section, article";
+  function sentenceIn(r, idx, start, end) {
+    if (IS_TEXT && r === main) return sentenceAround(idx.text, start, end);
+    const at = (pos) => { let n = null; for (const x of idx.nodes) { if (x.start > pos) break; n = x; } return n; };
+    const n = at(start), blk = n && n.node.parentElement && n.node.parentElement.closest(BLOCK);
+    if (!blk) return sentenceAround(idx.text, start, end);
+    let lo = Infinity, hi = -1;
+    for (const x of idx.nodes) if (blk.contains(x.node)) { lo = Math.min(lo, x.start); hi = Math.max(hi, x.start + x.node.data.length); }
+    return sentenceAround(idx.text, start, end, Math.min(lo, start), Math.max(hi, end));
+  }
+  // Находки одного предложения – одна строка: правка и так берёт предложение целиком.
+  function groupHits(hits) {
+    const groups = [];
+    for (const h of hits) {
+      const [s0, e0] = sentenceIn(h.r, index(h.r), h.start, h.end);
+      const last = groups[groups.length - 1];
+      if (last && last.r === h.r && s0 < last.end) { last.hits.push(h); last.end = Math.max(last.end, e0); }
+      else groups.push({ k: h.k, r: h.r, root: h.root, start: s0, end: e0, hits: [h] });
+    }
+    return groups;
+  }
+  // Предложение с уже применёнными автоисправлениями (тире, запятая после «Однако»): переписывать остаётся только смысловое.
+  function fixedText(g, text) {
+    let out = text.slice(g.start, g.end);
+    for (const h of [...g.hits].sort((x, y) => y.start - x.start)) {
+      if (!h.rule.fix) continue;
+      const a = h.start - g.start, b = h.end - g.start;
+      out = out.slice(0, a) + out.slice(a, b).replace(new RegExp(h.rule.fix[0], "u"), h.rule.fix[1]) + out.slice(b);
+    }
+    return out;
+  }
+  function takeGroup(g, how) {
+    const text = index(g.r).text;
+    if (textItemsOf(g.r.key).some((i) => g.start < i.end && i.start < g.end)) return toast("Это место уже в правке – допиши её карточку");
+    const quote = text.slice(g.start, g.end), titles = [...new Set(g.hits.map((h) => h.rule.title))];
+    const it = { id: uid(), kind: how === "agent" ? "comment" : "edit", scope: "text", start: g.start, end: g.end, quote,
+      prefix: text.slice(Math.max(0, g.start - CTX), g.start), suffix: text.slice(g.end, g.end + CTX),
+      where: MODE === "md" ? mdWhere(g.start) : MODE === "text" ? whereText(text, g.start) : g.r.label || "",
+      created: new Date().toISOString(), state: "pending", orphan: false,
+      rule: [...new Set(g.hits.map((h) => h.rule.id))].join(","), source: "radar" };
+    if (g.r.key) it.frame = g.r.key;
+    if (how === "agent") it.comment = "Переписать без нейрослопа: " + g.hits.map((h) => `${h.rule.title} – ${h.rule.why}`).filter((v, i, a) => a.indexOf(v) === i).join(" ");
+    else { it.replacement = draft(fixedText(g, text)); it.why = how === "fix" ? "" : titles.join(", "); }
+    items.push(it);
+    paint(); renderCards(); restStatus(); scheduleSave();
+    focusCard(it.id);
+  }
+  function dismissGroup(g) {
+    const add = g.hits.map((h) => ({ rule: h.rule.id, quote: h.quote, prefix: h.prefix }));
+    dismissed.push(...add);
+    paint(); renderCards(); scheduleSave();
+    toast("Больше не покажу здесь", { label: "Вернуть", run: () => { dismissed = dismissed.filter((d) => !add.includes(d)); paint(); renderCards(); scheduleSave(); } });
+  }
+  // Пробелы по краям кусков сохраняются: «прошёл без», а не «прошёлбез».
+  const squash = (t) => t.replace(/\s+/g, " ");
+  function slopSection(groups) {
+    const box = document.createElement("section");
+    box.className = "slop" + (slopOpen ? " open" : "");
+    box.setAttribute("aria-label", "Нейрослоп");
+    const n = groups.length;
+    box.innerHTML = `<button class="slop-head" aria-expanded="${slopOpen}"><span class="slop-mark"></span><span class="slop-title"></span>
+      <span class="slop-src"></span></button><div class="slop-list"></div>`;
+    box.querySelector(".slop-title").textContent = `Нейрослоп · ${n} ${n % 10 === 1 && n % 100 !== 11 ? "место" : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? "места" : "мест"}`;
+    box.querySelector(".slop-src").textContent = styleSkill ? `правила: ${styleSkill.name}` : "базовые правила";
+    box.querySelector(".slop-head").onclick = () => { slopOpen = !slopOpen; renderCards(); };
+    const list = box.querySelector(".slop-list");
+    const shown = slopMore ? groups : groups.slice(0, 5);
+    for (const g of shown) {
+      const text = index(g.r).text, allFix = g.hits.every((h) => h.rule.fix);
+      const row = document.createElement("div"); row.className = "hit"; row.dataset.k = g.k;
+      row.innerHTML = `<div class="hit-head"><span class="hit-rule"></span><button class="icon-btn" title="Это не нейрослоп" aria-label="Это не нейрослоп">${icon("close", 13)}</button></div>
+        <button class="hit-quote" title="Показать в документе"></button><div class="hit-why"></div>
+        <div class="hit-acts"><button class="btn sm solid" data-a="${allFix ? "fix" : "edit"}">${allFix ? "Исправить" : "Переписать"}</button><button class="btn sm" data-a="agent">Агенту</button></div>`;
+      const uniq = g.hits.filter((h, i, a) => a.findIndex((x) => x.rule.id === h.rule.id) === i);
+      row.querySelector(".hit-rule").textContent = uniq.map((h) => h.rule.title).join(" · ");
+      const why = row.querySelector(".hit-why");
+      why.textContent = uniq.map((h) => h.rule.why).join(" ");
+      why.title = why.textContent;
+      const q = row.querySelector(".hit-quote");
+      let pos = Math.max(g.start, g.hits[0].start - 70);
+      if (pos > g.start) q.append("…");
+      for (const h of g.hits) {
+        if (h.start < pos) continue;
+        q.append(squash(text.slice(pos, h.start)));
+        const m = document.createElement("mark"); m.textContent = squash(h.quote); q.append(m);
+        pos = h.end;
+      }
+      const tailEnd = Math.min(g.end, pos + 70);
+      q.append(squash(text.slice(pos, tailEnd)) + (tailEnd < g.end ? "…" : ""));
+      q.onclick = () => reveal({ scope: "text", frame: g.root || undefined, start: g.hits[0].start, end: g.hits[g.hits.length - 1].end });
+      row.querySelector(".icon-btn").onclick = () => dismissGroup(g);
+      for (const btn of row.querySelectorAll(".hit-acts .btn")) btn.onclick = () => takeGroup(g, btn.dataset.a);
+      list.append(row);
+    }
+    if (groups.length > shown.length) {
+      const more = document.createElement("button"); more.className = "slop-more"; more.textContent = `Показать ещё ${groups.length - shown.length}`;
+      more.onclick = () => { slopMore = true; renderCards(); };
+      list.append(more);
+    }
+    return box;
+  }
+  function hitAtPoint(r, x, y) {
+    let node, off;
+    if (r.doc.caretPositionFromPoint) { const p = r.doc.caretPositionFromPoint(x, y); if (!p) return null; node = p.offsetNode; off = p.offset; }
+    else if (r.doc.caretRangeFromPoint) { const rg = r.doc.caretRangeFromPoint(x, y); if (!rg) return null; node = rg.startContainer; off = rg.startOffset; }
+    else return null;
+    if (!r.el || !r.el.contains(node)) return null;
+    const idx = index(r), pos = offsetOf(r, idx, node, off);
+    return scanRoot(r, idx).find((h) => pos >= h.start && pos <= h.end) || null;
+  }
+  function focusHit(h) {
+    setPanel(true);
+    if (!slopOpen || !slopMore) { slopOpen = true; slopMore = true; renderCards(); }
+    const g = groupHits(allHits()).find((x) => x.hits.some((y) => y.k === h.k));
+    const row = g && sh.querySelector(`.hit[data-k="${CSS.escape(g.k)}"]`);
+    if (!row) return;
+    row.scrollIntoView({ block: "nearest", behavior: reduce.matches ? "auto" : "smooth" });
+    anim(row, { backgroundColor: ["rgba(214, 64, 40, .22)", "rgba(214, 64, 40, 0)"] }, { duration: 0.9 }).then(() => { row.style.backgroundColor = ""; });
   }
 
   function renderCards() {
@@ -977,7 +1194,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       ...textItems(),
       ...items.filter((i) => i.scope === "text" && (i.orphan || !rootOf(i))),
     ];
-    if (!all.length) {
+    if (!all.length && !(slopOn && allHits().length)) {
       const e = document.createElement("div"); e.className = "empty";
       e.innerHTML = `<b>Правок пока нет.</b><ol>
         <li>Выдели текст – появится «Изменить» и «Комментарий».</li>
@@ -986,6 +1203,8 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
         <p>${live ? "Пиши правку и жми «Отправить агенту» – он применит её сразу." : "Закончил – жми «Завершить ревью», агент применит правки."}</p>`;
       box.append(e);
     }
+    const hits = slopOn ? allHits() : [];
+    if (hits.length) box.append(slopSection(groupHits(hits)));
     for (const it of all) box.append(card(it));
     if (closed.length) {
       const d = document.createElement("details");
@@ -1438,7 +1657,9 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       }
       if ((r === main && e.composedPath().includes(host)) || !r.win.getSelection().isCollapsed) return;
       const it = itemAtPoint(r, e.clientX, e.clientY);
-      if (it) focusCard(it.id);
+      if (it) return focusCard(it.id);
+      const h = hitAtPoint(r, e.clientX, e.clientY);
+      if (h) focusHit({ ...h, r });
     }, true);
     d.addEventListener("mouseup", (e) => {
       if (blockMode || (r === main && e.composedPath().includes(host))) return;
@@ -1480,7 +1701,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     $("#status").dataset.state = state;
     $("#status-text").textContent = text;
   }
-  function payload() { const p = { register: register || null, register_auto: registerAuto, items, live }; if (MODE === "md") p.view = view; return p; }
+  function payload() { const p = { register: register || null, register_auto: registerAuto, items, live, dismissed }; if (MODE === "md") p.view = view; return p; }
   // Статус молчит, пока нечего сказать: число правок, короткое «Сохранено» после записи, ошибка – надолго.
   let quietTimer = null;
   function restStatus() {
@@ -1702,6 +1923,8 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     items = review.items.filter((i) => (i.state || "pending") === "pending");
     closed = review.items.filter((i) => (i.state || "pending") !== "pending");
     docSha = doc.sha;
+    dismissed = Array.isArray(review.dismissed) ? review.dismissed : [];
+    try { const rl = await (await fetch("/api/rules")).json(); styleSkill = rl.skill; compileRules(rl.rules || []); } catch (e) { /* без правил редактор работает как раньше */ }
     setLive(!!review.live, false);
     ready = true;
     allRoots().forEach(anchorRoot);
