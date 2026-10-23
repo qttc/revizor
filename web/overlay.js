@@ -1826,11 +1826,25 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       setStatus("error", "Не отправилось: сервер остановлен");
       return;
     }
-    $("#cover-text").textContent = `${items.length} ${plural(items.length)} ушли агенту. Вкладку можно закрыть.`;
+    $("#cover-text").textContent = `${items.length} ${plural(items.length)} ушли агенту. Как применит – новая версия откроется здесь же.`;
     const cv = $("#cover");
     cv.hidden = false;
     anim(cv, { opacity: [0, 1] }, { duration: 0.3 });
     anim(cv.querySelector("h2"), { opacity: [0, 1], y: [14, 0] }, { duration: 0.5, delay: 0.08 });
+    clearInterval(pollTimer); pollTimer = null;
+    awaitReopen();
+  }
+
+  // Агент применил правки и снова запустил `open` – он встаёт на тот же порт. Ждём его и перезагружаемся в новую версию.
+  function awaitReopen() {
+    const t = setInterval(async () => {
+      let st;
+      try { st = await (await fetch("/api/state", { cache: "no-store" })).json(); } catch (e) { return; }
+      if (st.review.status !== "open") return;
+      clearInterval(t);
+      try { sessionStorage.setItem("revizor-scroll", JSON.stringify({ x: scrollX, y: scrollY, c: 0 })); } catch (e) {}
+      location.replace("/?v=" + Date.now());
+    }, 1500);
   }
 
   // ---------- кнопки панели ----------

@@ -35,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -187,6 +187,7 @@ def pending(review: dict) -> list:
 
 LOCKS = Path.home() / ".cache" / "revizor" / "locks"
 TEXTS = Path.home() / ".cache" / "revizor" / "text"  # текст страницы для смысловой проверки: у бандла и HTML его видит только страница
+REOPEN_WAIT = 4  # с: вкладка опрашивает сервер раз в 1,5 с
 CTX = 32
 
 
@@ -482,7 +483,32 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def make_handler(doc: Path, done: threading.Event, update=None, skill="auto"):
+def port_free(port: int) -> bool:
+    with socket.socket() as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # как у HTTPServer: TIME_WAIT от прошлого сервера не мешает
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+        return True
+
+
+def last_port(doc: Path, port=None):
+    """Порт прошлого сервера этого документа. Повторный `open` встаёт на него, и старая вкладка подхватывает новый сервер."""
+    f = CACHE / "ports.json"
+    try:
+        ports = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        ports = {}
+    key = sha(str(doc))
+    if port is None:
+        return ports.get(key)
+    ports[key] = port
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(ports), encoding="utf-8")
+
+
+def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", seen=None):
     doc = doc.resolve()
     lock = threading.Lock()
     if skill == "auto":
@@ -509,6 +535,8 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto"):
             return json.loads(self.rfile.read(n).decode("utf-8") or "{}")
 
         def do_GET(self):
+            if seen:
+                seen.set()
             path = unquote(self.path.split("?")[0])
             if path == "/":
                 if kind(doc) != "html":
@@ -728,6 +756,7 @@ def cmd_open(args) -> int:
         sys.exit(f"поддерживаются {', '.join(sorted(TEXT_SUFFIXES | HTML_SUFFIXES))}: {doc.name}")
     remember_doc(doc)
     review = load(doc)
+    reopen = review["status"] == "done"
     if review["status"] == "done" and pending(review):
         print(f"В {sidecar(doc).name} есть {len(pending(review))} неприменённых правок, они откроются в редакторе.",
               file=sys.stderr)
@@ -739,19 +768,26 @@ def cmd_open(args) -> int:
     if update:
         print(f"Доступна новая версия Ревизора: {update['latest']}, у тебя {update['current']}. "
               f"Обновить: revizor.py update (или агенту – «обнови ревизор»).", file=sys.stderr, flush=True)
-    done = threading.Event()
-    port = args.port or free_port()
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(doc, done, update))
+    done, seen = threading.Event(), threading.Event()
+    prev = last_port(doc)
+    port = args.port or (prev if prev and port_free(prev) else free_port())
+    last_port(doc, port)
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(doc, done, update, seen=seen))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{port}/?v={int(datetime.now().timestamp())}"
     print(f"Редактор: {url}\nПравки: {sidecar(doc)}", file=sys.stderr, flush=True)
-    if not args.no_browser:
+    # После «Завершить ревью» вкладка ждёт сервер на старом порту и сама перезагружается.
+    # Вкладку закрыли – через пару секунд тишины открываем новую.
+    if reopen and port == prev and seen.wait(REOPEN_WAIT):
+        print("Вкладка с прошлого ревью подхватила редактор.", file=sys.stderr, flush=True)
+    elif not args.no_browser:
         subprocess.run(["open", "-a", "Google Chrome", url], check=False)
 
     try:
         done.wait()
     except KeyboardInterrupt:
         server.shutdown()
+        server.server_close()
         with locked(doc):
             review = load(doc)
             review["status"] = "stopped"  # `wait` в Live Edit видит это и заканчивает цикл
@@ -759,6 +795,7 @@ def cmd_open(args) -> int:
         print("Остановлено без «Завершить ревью». Правки, что успели сохраниться, в " + str(sidecar(doc)), file=sys.stderr)
         return 130
     server.shutdown()
+    server.server_close()  # порт свободен сразу: следующий `open` встанет на него
     print(summary(doc, load(doc)))
     return 0
 

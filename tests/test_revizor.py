@@ -2,9 +2,11 @@ import io
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -592,3 +594,61 @@ class ReleaseHygieneTest(unittest.TestCase):
         out = revizor.changelog_between("0.2.0", "0.3.0")
         self.assertIn("## [0.3.0]", out)
         self.assertNotIn("## [0.2.0]", out)
+
+
+def listening(port):
+    if not port:
+        return False
+    with socket.socket() as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+class ReopenTest(unittest.TestCase):
+    """После «Завершить ревью» агент снова запускает `open`: тот же порт, старая вкладка подхватывает сервер."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = Path(self.tmp.name).resolve()
+        self.doc = t / "report.md"
+        self.doc.write_text("# Итоги\n", encoding="utf-8")
+        self.saved = (revizor.CACHE, revizor.REGISTRY, revizor.REOPEN_WAIT, revizor.check_update, revizor.subprocess.run)
+        revizor.CACHE, revizor.REGISTRY, revizor.REOPEN_WAIT = t / "cache", t / "cache" / "docs.json", 1
+        revizor.check_update = lambda: None
+        self.opened = []
+        revizor.subprocess.run = lambda cmd, **kw: self.opened.append(cmd)
+
+    def tearDown(self):
+        revizor.CACHE, revizor.REGISTRY, revizor.REOPEN_WAIT, revizor.check_update, revizor.subprocess.run = self.saved
+        self.tmp.cleanup()
+
+    def run_open(self, tab=False):
+        """Один круг `open` до «Завершить ревью». tab – старая вкладка опрашивает сервер."""
+        prev, opened = revizor.last_port(self.doc), len(self.opened)
+        out = io.StringIO()
+        th = threading.Thread(target=lambda: revizor.main(["open", str(self.doc)]), daemon=True)
+        with redirect_stdout(out):
+            th.start()
+            deadline = time.time() + 5
+            while time.time() < deadline and not listening(revizor.last_port(self.doc)):
+                time.sleep(0.02)
+            base = f"http://127.0.0.1:{revizor.last_port(self.doc)}"
+            if tab:
+                urllib.request.urlopen(base + "/api/state", timeout=2).read()
+            while time.time() < deadline and not tab and len(self.opened) == opened:
+                time.sleep(0.02)
+            post(base + "/api/done", {"items": []})
+            th.join(5)
+        self.assertFalse(th.is_alive())
+        return prev, revizor.last_port(self.doc)
+
+    def test_second_open_reuses_port_and_keeps_tab(self):
+        self.run_open()
+        self.assertEqual(len(self.opened), 1)
+        prev, new = self.run_open(tab=True)
+        self.assertEqual(prev, new)
+        self.assertEqual(len(self.opened), 1)
+
+    def test_closed_tab_gets_new_one(self):
+        self.run_open()
+        self.run_open()
+        self.assertEqual(len(self.opened), 2)
