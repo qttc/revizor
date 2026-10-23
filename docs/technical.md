@@ -9,7 +9,8 @@ python3 revizor.py open FILE [--port N] [--no-browser]   # сервер в фо�
 python3 revizor.py wait FILE [--interval S]              # ждать работу из редактора: проверку на нейрослоп и правки Live Edit
 python3 revizor.py suggest FILE FINDINGS.json            # записать находки смысловой проверки (- – из stdin)
 python3 revizor.py update [--check]                      # обновиться из репо и показать, что поменялось
-python3 revizor.py style                                 # какой скилл стиля найден и сколько правил проверки
+python3 revizor.py style [init [--name N] [--force]]     # какой скилл стиля найден; init – создать из шаблона
+python3 revizor.py pairs [--count] [--ack] [--dir D]     # новые пары для обучения скилла стиля (JSON); --ack – порция разобрана
 python3 revizor.py show FILE [--json]                     # правки, которые ждут агента
 python3 revizor.py mark FILE ID... --state applied|rejected [--note TEXT]
 python3 revizor.py --version
@@ -127,6 +128,17 @@ python3 revizor.py --version
 ### Как находится скилл стиля
 
 Настраивать ничего не нужно. Ревизор смотрит `~/.claude/skills/*` и берёт скилл с наибольшим счётом: `revizor.json` в корне – 100, каталог примет `references/*tells*.md` – 50, в начале `SKILL.md` есть «стиль», «голос», style, voice или writing – 20, `references/examples.md` – 10. Ниже 30 – скилла нет, работают базовые правила. Свой скилл Ревизора в кандидаты не идёт. Ошибся – путь задаётся переменной `REVIZOR_STYLE_SKILL` или полем `style_skill` в `~/.config/revizor/config.json`. Что найдено, показывает `revizor.py style` и подпись в панели.
+
+## Обучение скилла стиля
+
+Механику делает `revizor.py`, разбор по смыслу – агент по плейбуку [skill/learn.md](../skill/learn.md).
+
+- **Откуда пары.** `open` записывает путь документа в `~/.cache/revizor/docs.json`. `pairs` читает файлы правок этих документов, плюс один поиск Spotlight (`mdfind -name .review.json`), чтобы подхватить ревью до появления реестра, плюс папки из `--dir`. Файлы правок только читаются.
+- **Что идёт в порцию.** `pairs` – применённые правки, где «стало» отличается от «было» не только пробелами. `confirmed` – механика из проверки, принятая одним кликом: подтверждает правило, примером не становится. `dismissed` – отметки «это не нейрослоп». Применённые комментарии в пары не идут: это просьба, а не образец.
+- **Журнал.** `revizor-learned.json` в скилле: `seen` – что уже разобрано (`путь файла правок#id`), `stats` – по каждому правилу `taken` и `dismissed`. `pairs` пишет порцию в `~/.cache/revizor/pairs-batch.json`, `pairs --ack` переносит её в журнал и обновляет статистику.
+- **Файлы скилла.** Роли – в `revizor.json` скилла (`files`: `examples`, `catalog`, `voice`, `rules`, `ledger`), без него – раскладка канона стиля: `references/examples.md`, `references/*tells*.md`, `references/voice.md`, `revizor-rules.json`, `revizor-learned.json`.
+- **Нет скилла.** `pairs` создаёт его из `templates/style-skill/` в `~/.claude/skills/writing-style` (занято – `revizor-style`), каталог примет стартует с `rules/semantic-ru.md`. Дальше скилл находится сам: у него есть `revizor.json`.
+- **Когда.** Скилл Ревизора после «Завершить ревью» вызывает `pairs --count` и учит при 5 и больше новых сигналах, по словам «обучи стиль» – всегда.
 
 ## Live Edit (бета)
 
