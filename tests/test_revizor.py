@@ -489,6 +489,37 @@ class LearnTest(unittest.TestCase):
         self.assertEqual(out["stats"]["ne-pro"]["dismissed"], 1)
         self.assertEqual(self.cli("pairs", "--count").strip(), "0")
 
+    def test_learn_from_limits_where_skill_learns(self):
+        revizor.CONFIG.write_text(json.dumps({"learn_from": str(self.doc.parent)}), encoding="utf-8")
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(self.tmp.name)
+        self.assertEqual(self.cli("pairs", "--count").strip(), "0")
+        self.assertFalse((revizor.SKILLS_DIR / "writing-style").exists())  # и скилл не создан
+        os.chdir(self.doc.parent)
+        self.assertEqual(self.cli("pairs", "--count").strip(), "2")  # пары и отклонения; подтверждения не считаются
+
+    def test_weak_style_skill_is_used_instead_of_new(self):
+        d = revizor.SKILLS_DIR / "my-voice"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text("---\nname: my-voice\ndescription: мой стиль текстов\n---", encoding="utf-8")
+        out = json.loads(self.cli("pairs"))
+        self.assertFalse(out["created"])
+        self.assertEqual(out["skill"]["name"], "my-voice")
+
+    def test_ledger_keeps_hashes_and_migrates_paths(self):
+        out = json.loads(self.cli("pairs"))
+        self.assertRegex(out["pairs"][0]["key"], r"^[0-9a-f]{16}$")
+        ledger = Path(out["files"]["ledger"])
+        ledger.write_text(json.dumps({"seen": [f"{revizor.sidecar(self.doc)}#a"], "stats": {}}), encoding="utf-8")
+        self.assertEqual(json.loads(self.cli("pairs"))["pairs"], [])  # старый ключ-путь узнан
+        self.cli("pairs", "--ack")
+        self.assertNotIn("/", ledger.read_text(encoding="utf-8").split('"seen"')[1].split("]")[0])
+
+    def test_batch_is_capped(self):
+        out = json.loads(self.cli("pairs", "--max", "2"))
+        self.assertEqual(len(out["pairs"]) + len(out["dismissed"]) + len(out["confirmed"]), 2)
+
     def test_skill_files_follow_existing_layout(self):
         d = revizor.SKILLS_DIR / "writing-style" / "references"
         d.mkdir(parents=True)

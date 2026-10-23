@@ -379,14 +379,17 @@ def _skill_score(d: Path) -> int:
     return score
 
 
-def find_style_skill():
-    """Скилл стиля владельца: {"name", "path"} или None. Свой скилл Ревизора в кандидаты не идёт."""
-    explicit = os.environ.get("REVIZOR_STYLE_SKILL")
-    if not explicit and CONFIG.is_file():
-        try:
-            explicit = json.loads(CONFIG.read_text(encoding="utf-8")).get("style_skill")
-        except (OSError, ValueError):
-            explicit = None
+def config() -> dict:
+    try:
+        return json.loads(CONFIG.read_text(encoding="utf-8")) if CONFIG.is_file() else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def find_style_skill(min_score: int = 30):
+    """Скилл стиля владельца: {"name", "path"} или None. Свой скилл Ревизора в кандидаты не идёт.
+    min_score 20 – «слабый» скилл: только SKILL.md про стиль, без каталога и примеров."""
+    explicit = os.environ.get("REVIZOR_STYLE_SKILL") or config().get("style_skill")
     if explicit:
         d = Path(explicit).expanduser()
         return {"name": d.name, "path": str(d)} if d.is_dir() else None
@@ -398,7 +401,7 @@ def find_style_skill():
         sc = _skill_score(real)
         if sc > top:
             best, top = d, sc
-    return {"name": best.name, "path": str(best.resolve())} if best is not None and top >= 30 else None
+    return {"name": best.name, "path": str(best.resolve())} if best is not None and top >= min_score else None
 
 
 def load_rules(skill=None) -> dict:
@@ -635,7 +638,7 @@ def collect_pairs(ledger: dict, extra=()) -> dict:
         except (OSError, ValueError):
             continue
         for i in review.get("items", []):
-            key = f"{f}#{i.get('id')}"
+            key = sha(f"{f}#{i.get('id')}")  # в журнале скилла – хэш: пути к рабочим документам туда не попадают
             if key in seen or i.get("state") != "applied" or i.get("kind") != "edit":
                 continue
             before, after = i.get("quote", ""), i.get("replacement", "")
@@ -648,20 +651,40 @@ def collect_pairs(ledger: dict, extra=()) -> dict:
             # чистая механика из проверки («Исправить» без ручной правки) – подтверждение правила, а не новый пример
             (confirmed if i.get("source") == "radar" and not i.get("why") else pairs).append(entry)
         for d in review.get("dismissed", []):
-            key = f"{f}#x:{d.get('rule')}:{d.get('prefix', '')}{d.get('quote', '')}"
+            key = sha(f"{f}#x:{d.get('rule')}:{d.get('prefix', '')}{d.get('quote', '')}")
             if key not in seen:
                 dismissed.append({"key": key, "doc": review.get("doc"), "rule": d.get("rule"), "quote": d.get("quote"), "before": d.get("prefix")})
     return {"pairs": pairs, "dismissed": dismissed, "confirmed": confirmed}
 
 
+def learn_allowed() -> bool:
+    """learn_from в конфиге – обучать скилл только из этой папки (у автора – хаб: пространства пишут только в себя).
+    Нет настройки – обучение откуда угодно."""
+    root = config().get("learn_from")
+    if not root:
+        return True
+    cwd, base = Path.cwd().resolve(), Path(root).expanduser().resolve()
+    return cwd == base or base in cwd.parents
+
+
 def cmd_pairs(args) -> int:
-    """Порция для обучения скилла стиля. Нет скилла – создаётся из шаблона: настраивать ничего не нужно."""
-    skill, created = find_style_skill(), False
+    """Порция для обучения скилла стиля. Нет скилла – подключается слабый (только SKILL.md про стиль) или создаётся
+    из шаблона: настраивать ничего не нужно."""
+    if not learn_allowed():
+        where = config().get("learn_from")
+        if args.count:
+            print(0)
+        print(f"Обучение скилла стиля запускается из {where} (learn_from в {CONFIG}). Пары копятся, их заберёт обучение оттуда.",
+              file=sys.stderr)
+        return 0 if args.count else 3
+    skill, created = find_style_skill() or find_style_skill(min_score=20), False
     if not skill:
         skill, created = init_style_skill(), True
     files = skill_files(skill)
     ledger_path = Path(files["ledger"])
     ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.is_file() else {"seen": [], "stats": {}}
+    # журналы до 0.8.0 хранили путь#id – перевести в хэши
+    ledger["seen"] = [k if re.fullmatch(r"[0-9a-f]{16}", k) else sha(k) for k in ledger.get("seen", [])]
     if args.ack:
         if not BATCH.is_file():
             print("Нечего отмечать: порции нет. Сначала revizor.py pairs.")
@@ -679,6 +702,11 @@ def cmd_pairs(args) -> int:
         print(f"В журнал скилла {skill['name']}: {sum(len(batch.get(k, [])) for k in ('pairs', 'dismissed', 'confirmed'))} записей.")
         return 0
     got = collect_pairs(ledger, args.dir or ())
+    total = len(got["pairs"]) + len(got["dismissed"]) + len(got["confirmed"])
+    if not args.count and total > args.max:  # первая порция после обновления бывает большой: остальное – в следующий раз
+        left = args.max
+        for k in ("pairs", "dismissed", "confirmed"):
+            got[k], left = got[k][:left], max(0, left - len(got[k][:left]))
     out = {"skill": skill, "created": created, "files": files, "playbook": str(ROOT / "skill" / "learn.md"),
            "stats": ledger.get("stats", {}), **got}
     CACHE.mkdir(parents=True, exist_ok=True)
@@ -899,6 +927,7 @@ def main(argv=None) -> int:
     p.add_argument("--ack", action="store_true", help="отметить последнюю порцию разобранной")
     p.add_argument("--count", action="store_true", help="только число новых сигналов")
     p.add_argument("--dir", action="append", help="искать файлы правок ещё и здесь")
+    p.add_argument("--max", type=int, default=40, help="сколько сигналов в порции, остальное – в следующий раз")
     p.set_defaults(fn=cmd_pairs)
     p = sub.add_parser("update", help="обновить Ревизор из репо (git pull) и показать, что поменялось")
     p.add_argument("--check", action="store_true", help="только проверить, есть ли новая версия (кэш на сутки)")
