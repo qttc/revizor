@@ -8,13 +8,15 @@
     revizor.py wait FILE                              ждать работу из редактора: правки Live Edit и проверку на нейрослоп
     revizor.py suggest FILE FINDINGS.json            записать находки смысловой проверки на нейрослоп
     revizor.py update [--check [--force]]            обновиться из репо (git pull) и показать, что поменялось
-    revizor.py style                                 какой скилл стиля нашёл Ревизор и сколько правил проверки
+    revizor.py style [init]                          какой скилл стиля нашёл Ревизор; init – создать из шаблона
+    revizor.py pairs [--ack]                         новые пары «было → стало» для обучения скилла стиля
 
 Правки лежат рядом с документом: report.md → report.review.json. Формат – в docs/technical.md.
 Проверка новой версии – раз в сутки при open, выключается REVIZOR_NO_UPDATE_CHECK=1.
 Только stdlib, Python 3.9+.
 """
 import argparse
+import shutil
 import contextlib
 import fcntl
 import hashlib
@@ -33,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -46,6 +48,10 @@ ASSET_PREFIX = "/_revizor/"
 OVERLAY_TAG = f'<script src="{ASSET_PREFIX}overlay.js" defer></script>'
 FORMAT_VERSION = 1
 RULES_DIR = ROOT / "rules"
+TEMPLATE = ROOT / "templates" / "style-skill"
+CACHE = Path.home() / ".cache" / "revizor"
+REGISTRY = CACHE / "docs.json"      # какие документы открывались в Ревизоре – отсюда берутся пары для обучения
+BATCH = CACHE / "pairs-batch.json"  # последняя выданная агенту порция пар, `pairs --ack` переносит её в журнал скилла
 SKILLS_DIR = Path.home() / ".claude" / "skills"
 CONFIG = Path.home() / ".config" / "revizor" / "config.json"
 
@@ -413,7 +419,48 @@ def load_rules(skill=None) -> dict:
     return {"skill": skill, "rules": list(rules.values())}
 
 
+def skill_files(skill: dict) -> dict:
+    """Роли файлов скилла стиля. revizor.json задаёт их явно, иначе – раскладка как у канона стиля: references/examples.md,
+    каталог примет references/*tells*.md, голос references/voice.md. Файла может ещё не быть – его создаст обучение."""
+    d = Path(skill["path"])
+    manifest = {}
+    if (d / "revizor.json").is_file():
+        try:
+            manifest = json.loads((d / "revizor.json").read_text(encoding="utf-8")).get("files", {})
+        except (OSError, ValueError):
+            manifest = {}
+    tells = sorted(d.glob("references/*tells-ru*.md")) or sorted(d.glob("references/*tells*.md"))
+    roles = {"examples": "references/examples.md", "catalog": str(tells[0].relative_to(d)) if tells else "references/ai-tells-ru.md",
+             "voice": "references/voice.md", "rules": "revizor-rules.json", "ledger": "revizor-learned.json"}
+    roles.update({k: v for k, v in manifest.items() if isinstance(v, str)})
+    return {k: str(d / v) for k, v in roles.items()}
+
+
+def init_style_skill(name=None) -> dict:
+    """Скилл стиля из шаблона – когда своего нет. Имя – первое свободное: writing-style, revizor-style."""
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    for cand in ([name] if name else ["writing-style", "revizor-style"]):
+        d = SKILLS_DIR / cand
+        if not d.exists():
+            break
+    else:
+        sys.exit(f"скилл {cand} уже есть: {d}")
+    shutil.copytree(TEMPLATE, d)
+    shutil.copy(RULES_DIR / "semantic-ru.md", d / "references" / "ai-tells-ru.md")  # каталог стартует с базового, дальше растёт из правок
+    md = d / "SKILL.md"
+    md.write_text(md.read_text(encoding="utf-8").replace("{{name}}", d.name), encoding="utf-8")
+    return {"name": d.name, "path": str(d)}
+
+
 def cmd_style(args) -> int:
+    if args.action == "init":
+        skill = find_style_skill()
+        if skill and not args.force:
+            print(f"Скилл стиля уже есть: {skill['name']} ({skill['path']}).")
+            return 0
+        skill = init_style_skill(args.name)
+        print(f"Создан скилл стиля {skill['name']}: {skill['path']}. Ревизор будет учить его на твоих правках.")
+        return 0
     skill = find_style_skill()
     rules = load_rules(skill)["rules"]
     own = sum(1 for r in rules if r["source"] != "base")
@@ -548,12 +595,108 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto"):
     return Handler
 
 
+def remember_doc(doc: Path) -> None:
+    try:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        docs = json.loads(REGISTRY.read_text(encoding="utf-8")) if REGISTRY.is_file() else []
+        if str(doc) not in docs:
+            REGISTRY.write_text(json.dumps(docs + [str(doc)], ensure_ascii=False, indent=1), encoding="utf-8")
+    except (OSError, ValueError):
+        pass  # реестр – удобство для обучения, редактору он не нужен
+
+
+def known_sidecars(extra=()) -> list:
+    """Файлы правок для обучения: из реестра открытых документов, плюс разовый поиск Spotlight – чтобы подхватить ревью,
+    сделанные до появления реестра. Без Spotlight – только реестр."""
+    found = set()
+    if REGISTRY.is_file():
+        try:
+            found |= {str(sidecar(Path(d))) for d in json.loads(REGISTRY.read_text(encoding="utf-8"))}
+        except (OSError, ValueError):
+            pass
+    if shutil.which("mdfind"):
+        try:
+            out = subprocess.run(["mdfind", "-name", ".review.json"], capture_output=True, text=True, timeout=10).stdout
+            found |= {l for l in out.splitlines() if l.endswith(".review.json")}
+        except (OSError, subprocess.SubprocessError):
+            pass
+    for d in extra:
+        found |= {str(p) for p in Path(d).expanduser().rglob("*.review.json")}
+    return sorted(f for f in found if Path(f).is_file())
+
+
+def collect_pairs(ledger: dict, extra=()) -> dict:
+    """Новые сигналы для обучения: правки владельца (пары), отметки «это не нейрослоп», принятые находки проверки."""
+    seen = set(ledger.get("seen", []))
+    pairs, dismissed, confirmed = [], [], []
+    for f in known_sidecars(extra):
+        try:
+            review = json.loads(Path(f).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for i in review.get("items", []):
+            key = f"{f}#{i.get('id')}"
+            if key in seen or i.get("state") != "applied" or i.get("kind") != "edit":
+                continue
+            before, after = i.get("quote", ""), i.get("replacement", "")
+            if re.sub(r"\s+", " ", before).strip() == re.sub(r"\s+", " ", after).strip():
+                continue
+            entry = {"key": key, "doc": review.get("doc"), "register": review.get("register"), "before": before, "after": after,
+                     "why": i.get("why") or "", "where": i.get("where") or ""}
+            if i.get("rule"):
+                entry["rule"], entry["source"] = i["rule"], i.get("source", "radar")
+            # чистая механика из проверки («Исправить» без ручной правки) – подтверждение правила, а не новый пример
+            (confirmed if i.get("source") == "radar" and not i.get("why") else pairs).append(entry)
+        for d in review.get("dismissed", []):
+            key = f"{f}#x:{d.get('rule')}:{d.get('prefix', '')}{d.get('quote', '')}"
+            if key not in seen:
+                dismissed.append({"key": key, "doc": review.get("doc"), "rule": d.get("rule"), "quote": d.get("quote"), "before": d.get("prefix")})
+    return {"pairs": pairs, "dismissed": dismissed, "confirmed": confirmed}
+
+
+def cmd_pairs(args) -> int:
+    """Порция для обучения скилла стиля. Нет скилла – создаётся из шаблона: настраивать ничего не нужно."""
+    skill, created = find_style_skill(), False
+    if not skill:
+        skill, created = init_style_skill(), True
+    files = skill_files(skill)
+    ledger_path = Path(files["ledger"])
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.is_file() else {"seen": [], "stats": {}}
+    if args.ack:
+        if not BATCH.is_file():
+            print("Нечего отмечать: порции нет. Сначала revizor.py pairs.")
+            return 1
+        batch = json.loads(BATCH.read_text(encoding="utf-8"))
+        stats = ledger.setdefault("stats", {})
+        for kind, field in (("pairs", "taken"), ("confirmed", "taken"), ("dismissed", "dismissed")):
+            for e in batch.get(kind, []):
+                for rule in filter(None, (e.get("rule") or "").split(",")):
+                    stats.setdefault(rule, {"taken": 0, "dismissed": 0})[field] += 1
+        ledger["seen"] = sorted(set(ledger.get("seen", [])) | {e["key"] for k in ("pairs", "dismissed", "confirmed") for e in batch.get(k, [])})
+        ledger["updated"] = now()
+        ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        BATCH.unlink()
+        print(f"В журнал скилла {skill['name']}: {sum(len(batch.get(k, [])) for k in ('pairs', 'dismissed', 'confirmed'))} записей.")
+        return 0
+    got = collect_pairs(ledger, args.dir or ())
+    out = {"skill": skill, "created": created, "files": files, "playbook": str(ROOT / "skill" / "learn.md"),
+           "stats": ledger.get("stats", {}), **got}
+    CACHE.mkdir(parents=True, exist_ok=True)
+    BATCH.write_text(json.dumps(got, ensure_ascii=False), encoding="utf-8")
+    if args.count:
+        print(len(got["pairs"]) + len(got["dismissed"]))
+    else:
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+    return 0
+
+
 def cmd_open(args) -> int:
     doc = Path(args.file).expanduser().resolve()
     if not doc.is_file():
         sys.exit(f"нет файла: {doc}")
     if doc.suffix.lower() not in TEXT_SUFFIXES | HTML_SUFFIXES:
         sys.exit(f"поддерживаются {', '.join(sorted(TEXT_SUFFIXES | HTML_SUFFIXES))}: {doc.name}")
+    remember_doc(doc)
     review = load(doc)
     if review["status"] == "done" and pending(review):
         print(f"В {sidecar(doc).name} есть {len(pending(review))} неприменённых правок, они откроются в редакторе.",
@@ -747,8 +890,16 @@ def main(argv=None) -> int:
     p.add_argument("file")
     p.add_argument("findings", help="JSON: [{quote, rewrite, rule, title, why, root}] или - для stdin")
     p.set_defaults(fn=cmd_suggest)
-    p = sub.add_parser("style", help="какой скилл стиля нашёл Ревизор")
+    p = sub.add_parser("style", help="какой скилл стиля нашёл Ревизор; init – создать из шаблона")
+    p.add_argument("action", nargs="?", choices=["init"])
+    p.add_argument("--name")
+    p.add_argument("--force", action="store_true", help="с init: создать, даже если скилл уже найден")
     p.set_defaults(fn=cmd_style)
+    p = sub.add_parser("pairs", help="новые пары «было → стало» для обучения скилла стиля (JSON)")
+    p.add_argument("--ack", action="store_true", help="отметить последнюю порцию разобранной")
+    p.add_argument("--count", action="store_true", help="только число новых сигналов")
+    p.add_argument("--dir", action="append", help="искать файлы правок ещё и здесь")
+    p.set_defaults(fn=cmd_pairs)
     p = sub.add_parser("update", help="обновить Ревизор из репо (git pull) и показать, что поменялось")
     p.add_argument("--check", action="store_true", help="только проверить, есть ли новая версия (кэш на сутки)")
     p.add_argument("--force", action="store_true", help="с --check: спросить репо сейчас, мимо кэша")

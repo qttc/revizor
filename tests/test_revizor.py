@@ -421,6 +421,84 @@ class SemanticScanTest(ServerTest.__base__):
             post(self.base + "/api/scan", {"roots": []})
 
 
+
+class LearnTest(unittest.TestCase):
+    """Обучение: пары из файлов правок, журнал в скилле, скилл из шаблона, если своего нет."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = Path(self.tmp.name)
+        self.saved = {k: getattr(revizor, k) for k in ("SKILLS_DIR", "CONFIG", "CACHE", "REGISTRY", "BATCH")}
+        self.saved_which = revizor.shutil.which
+        revizor.SKILLS_DIR, revizor.CONFIG = t / "skills", t / "no-config.json"
+        revizor.CACHE, revizor.REGISTRY, revizor.BATCH = t / "cache", t / "cache" / "docs.json", t / "cache" / "batch.json"
+        revizor.shutil.which = lambda name: None  # Spotlight в тестах не трогаем: только реестр
+        self.env = os.environ.pop("REVIZOR_STYLE_SKILL", None)
+        self.doc = t / "work" / "report.md"
+        self.doc.parent.mkdir()
+        self.doc.write_text("Текст", encoding="utf-8")
+        revizor.remember_doc(self.doc)
+        r = revizor.load(self.doc)
+        r["register"] = "report"
+        r["items"] = [
+            {"id": "a", "kind": "edit", "scope": "text", "quote": "Локальная страница", "replacement": "Мини-тула", "state": "applied"},
+            {"id": "b", "kind": "edit", "scope": "text", "quote": "так", "replacement": "так ", "state": "applied"},
+            {"id": "c", "kind": "edit", "scope": "text", "quote": "x", "replacement": "y", "state": "pending"},
+            {"id": "d", "kind": "edit", "scope": "text", "quote": "Однако, нет", "replacement": "Однако нет", "state": "applied", "rule": "odnako", "source": "radar"},
+            {"id": "e", "kind": "comment", "scope": "doc", "comment": "короче", "state": "applied"}]
+        r["dismissed"] = [{"rule": "ne-pro", "quote": "не про", "prefix": "это "}]
+        revizor.save(self.doc, r)
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            setattr(revizor, k, v)
+        revizor.shutil.which = self.saved_which
+        if self.env is not None:
+            os.environ["REVIZOR_STYLE_SKILL"] = self.env
+        self.tmp.cleanup()
+
+    def cli(self, *argv):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            revizor.main(list(argv))
+        return buf.getvalue()
+
+    def test_creates_skill_from_template_when_none(self):
+        out = json.loads(self.cli("pairs"))
+        self.assertTrue(out["created"])
+        d = Path(out["skill"]["path"])
+        self.assertEqual(d.name, "writing-style")
+        self.assertIn("name: writing-style", (d / "SKILL.md").read_text(encoding="utf-8"))
+        self.assertTrue((d / "references" / "ai-tells-ru.md").is_file())
+        self.assertEqual(revizor.find_style_skill()["name"], "writing-style")  # создан – дальше находится сам
+        self.assertFalse(json.loads(self.cli("pairs"))["created"])
+
+    def test_pairs_take_only_real_applied_edits(self):
+        out = json.loads(self.cli("pairs"))
+        self.assertEqual([p["before"] for p in out["pairs"]], ["Локальная страница"])
+        self.assertEqual(out["pairs"][0]["register"], "report")
+        self.assertEqual([c["rule"] for c in out["confirmed"]], ["odnako"])
+        self.assertEqual([d["rule"] for d in out["dismissed"]], ["ne-pro"])
+
+    def test_ack_moves_batch_to_ledger_with_stats(self):
+        self.cli("pairs")
+        self.assertIn("3 записей", self.cli("pairs", "--ack"))
+        out = json.loads(self.cli("pairs"))
+        self.assertEqual(out["pairs"] + out["dismissed"] + out["confirmed"], [])
+        self.assertEqual(out["stats"]["odnako"]["taken"], 1)
+        self.assertEqual(out["stats"]["ne-pro"]["dismissed"], 1)
+        self.assertEqual(self.cli("pairs", "--count").strip(), "0")
+
+    def test_skill_files_follow_existing_layout(self):
+        d = revizor.SKILLS_DIR / "writing-style" / "references"
+        d.mkdir(parents=True)
+        (d / "ai-tells-ru.md").write_text("", encoding="utf-8")
+        (d.parent / "SKILL.md").write_text("стиль", encoding="utf-8")
+        files = revizor.skill_files(revizor.find_style_skill())
+        self.assertTrue(files["catalog"].endswith("references/ai-tells-ru.md"))
+        self.assertTrue(files["ledger"].endswith("revizor-learned.json"))
+
+
 if __name__ == "__main__":
     unittest.main()
 
