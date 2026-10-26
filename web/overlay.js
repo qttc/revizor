@@ -1931,9 +1931,21 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     b.style.zoom = "";
     if (!panelOpen || isSheet()) return;
     const html = document.documentElement;
-    const content = Math.max(html.scrollWidth - PANEL_W, b.scrollWidth); // у body бывает overflow-x: hidden
     const avail = html.clientWidth - PANEL_W;
+    const content = Math.max(html.scrollWidth - PANEL_W, b.scrollWidth, wideContent(b, avail)); // у body бывает overflow-x: hidden
     if (content > avail + 1) b.style.zoom = String(Math.max(0.5, avail / content));
+  }
+  // Слайд шире окна, отцентрованный во flex или через margin: auto, вылезает и влево, а scrollWidth левый вылет не видит.
+  // Меряем границы видимых элементов шире доступного места. Слайды карусели за правым краем экрана не считаются.
+  function wideContent(b, avail) {
+    let lo = 0, hi = 0;
+    for (const e of b.querySelectorAll("*")) {
+      const r = e.getBoundingClientRect();
+      if (r.width <= avail || r.left >= avail || r.right <= 0) continue;
+      if (e.closest("template") || getComputedStyle(e).position === "fixed") continue;
+      lo = Math.min(lo, r.left); hi = Math.max(hi, r.right);
+    }
+    return hi - lo;
   }
   let fitTimer = null;
   const refit = () => { clearTimeout(fitTimer); fitTimer = setTimeout(() => { syncPanelAttr(); fit(); placeSheet(); }, 100); };
