@@ -232,7 +232,12 @@ class CliTest(unittest.TestCase):
 class LiveEditTest(ServerTest.__base__):
     """Live Edit: страница отправляет правку, `wait` её забирает, агент отмечает. Состояние общее – файл правок."""
 
-    setUp, tearDown, edit = ServerTest.setUp, ServerTest.tearDown, ServerTest.edit
+    tearDown, edit = ServerTest.tearDown, ServerTest.edit
+
+    def setUp(self):
+        ServerTest.setUp(self)
+        self.addCleanup(setattr, revizor, "WAIT_GRACE", revizor.WAIT_GRACE)
+        revizor.WAIT_GRACE = 0
 
     def wait(self):
         buf = io.StringIO()
@@ -274,6 +279,20 @@ class LiveEditTest(ServerTest.__base__):
         self.assertIn("завершено", self.wait())
         self.assertFalse(revizor.load(self.doc)["items"][0].get("taken"))
 
+    def test_wait_outlasts_old_done_while_reopening(self):
+        post(self.base + "/api/done", {"items": []})
+        revizor.WAIT_GRACE = 5
+        out = []
+        t = threading.Thread(target=lambda: out.append(self.wait()))
+        t.start()
+        time.sleep(0.3)  # wait уже прочитал старый «завершено», а open только сейчас открывает ревью заново
+        r = revizor.load(self.doc)
+        r["status"] = "open"
+        revizor.save(self.doc, r)
+        post(self.base + "/api/review", {"items": [dict(self.edit("a"), sent="t")]})
+        t.join(5)
+        self.assertIn("Live Edit: 1 правка", out[0])
+
     def test_source_endpoint_serves_current_text(self):
         self.doc.write_text("# Новое\n", encoding="utf-8")
         self.assertEqual(urllib.request.urlopen(self.base + "/api/source").read().decode(), "# Новое\n")
@@ -291,7 +310,7 @@ class StyleSkillTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.skills = Path(self.tmp.name)
+        self.skills = Path(self.tmp.name).resolve()
         self.saved = (revizor.SKILLS_DIR, revizor.CONFIG, os.environ.pop("REVIZOR_STYLE_SKILL", None))
         revizor.SKILLS_DIR, revizor.CONFIG = self.skills, self.skills / "no-config.json"
 
@@ -336,6 +355,41 @@ class StyleSkillTest(unittest.TestCase):
         d = self.skill("writing-style", "стиль", ["references/ai-tells-ru.md"])
         (d / "revizor-rules.json").write_text("{не json", encoding="utf-8")
         self.assertIn("ne-pro", {r["id"] for r in revizor.load_rules(revizor.find_style_skill())["rules"]})
+
+    def test_text_lang_by_main_alphabet(self):
+        self.assertEqual(revizor.text_lang("Конверсия выросла после релиза v2.1"), "ru")
+        self.assertEqual(revizor.text_lang("Conversion grew – см. отчёт"), "en")
+
+    def test_catalog_follows_document_language(self):
+        d = self.skill("writing-style", "стиль", ["references/ai-tells-ru.md", "references/ai-tells-en.md"])
+        sk = revizor.find_style_skill()
+        self.assertEqual(Path(revizor.skill_files(sk, "en")["catalog"]), d / "references/ai-tells-en.md")
+        self.assertEqual(Path(revizor.skill_files(sk)["catalog"]), d / "references/ai-tells-ru.md")
+
+    def test_catalog_for_missing_language_is_new_file(self):
+        d = self.skill("writing-style", "стиль", ["references/ai-tells-ru.md"])
+        self.assertEqual(Path(revizor.skill_files(revizor.find_style_skill(), "en")["catalog"]), d / "references/ai-tells-en.md")
+        g = self.skill("generic", "", ["references/tells.md", "revizor.json"])
+        self.assertEqual(Path(revizor.skill_files({"name": "generic", "path": str(g)}, "en")["catalog"]), g / "references/tells.md")
+
+    def test_manifest_roles_by_language(self):
+        d = self.skill("my-own", "", ["revizor.json"])
+        (d / "revizor.json").write_text(json.dumps({"files": {
+            "examples": {"ru": "ru/pairs.md", "en": "en/pairs.md"}, "voice": "voice.md"}}), encoding="utf-8")
+        sk = revizor.find_style_skill()
+        self.assertEqual(Path(revizor.skill_files(sk, "en")["examples"]), d / "en/pairs.md")
+        self.assertEqual(Path(revizor.skill_files(sk, "ru")["examples"]), d / "ru/pairs.md")
+        self.assertEqual(Path(revizor.skill_files(sk, "en")["voice"]), d / "voice.md")
+
+    def test_style_skill_per_language_in_config(self):
+        ru = self.skill("writing-style", "стиль", ["references/ai-tells-ru.md"])
+        en = self.skill("writing-en", "", ["references/ai-tells-en.md"])
+        revizor.CONFIG.write_text(json.dumps({"style_skill": {"ru": str(ru), "en": str(en)}}), encoding="utf-8")
+        self.assertEqual(revizor.find_style_skill(lang="en")["name"], "writing-en")
+        self.assertEqual(revizor.find_style_skill(lang="ru")["name"], "writing-style")
+        self.assertEqual(revizor.find_style_skill()["name"], "writing-style")
+        revizor.CONFIG.write_text(json.dumps({"style_skill": {"en": str(en)}}), encoding="utf-8")
+        self.assertEqual(revizor.find_style_skill(lang="ru")["name"], "writing-style")  # языка нет в настройке – автопоиск
 
     def test_base_rules_are_complete(self):
         for r in revizor.load_rules()["rules"]:
@@ -417,6 +471,20 @@ class SemanticScanTest(ServerTest.__base__):
         review = revizor.load(self.doc)
         self.assertEqual(len(review["findings"]), 1)
         self.assertEqual(review["scan"]["state"], "done")
+
+    def test_scan_uses_catalog_of_text_language(self):
+        skills = Path(self.tmp.name).resolve() / "skills"
+        (skills / "writing-style" / "references").mkdir(parents=True)
+        for f in ("ai-tells-ru.md", "ai-tells-en.md"):
+            (skills / "writing-style" / "references" / f).write_text("", encoding="utf-8")
+        saved = (revizor.SKILLS_DIR, revizor.CONFIG, os.environ.pop("REVIZOR_STYLE_SKILL", None))
+        revizor.SKILLS_DIR, revizor.CONFIG = skills, skills / "no-config.json"
+        self.addCleanup(lambda: (setattr(revizor, "SKILLS_DIR", saved[0]), setattr(revizor, "CONFIG", saved[1]),
+                                 saved[2] is not None and os.environ.__setitem__("REVIZOR_STYLE_SKILL", saved[2])))
+        self.request("# Results\n\nConversion grew after the new onboarding. And that changes everything.\n")
+        out = self.cli("wait", str(self.doc), "--interval", "0.05")
+        self.assertIn("Язык: en", out)
+        self.assertIn("ai-tells-en.md (скилл writing-style)", out)
 
     def test_scan_needs_text(self):
         with self.assertRaises(urllib.error.HTTPError):
@@ -521,6 +589,34 @@ class LearnTest(unittest.TestCase):
     def test_batch_is_capped(self):
         out = json.loads(self.cli("pairs", "--max", "2"))
         self.assertEqual(len(out["pairs"]) + len(out["dismissed"]) + len(out["confirmed"]), 2)
+
+    def test_pairs_carry_language_and_its_files(self):
+        r = revizor.load(self.doc)
+        r["items"].append({"id": "f", "kind": "edit", "scope": "text", "quote": "This is not X, it is Y",
+                           "replacement": "This is Y", "state": "applied"})
+        revizor.save(self.doc, r)
+        out = json.loads(self.cli("pairs"))
+        langs = {p["before"]: p["lang"] for p in out["pairs"]}
+        self.assertEqual(langs, {"Локальная страница": "ru", "This is not X, it is Y": "en"})
+        self.assertTrue(out["langs"]["en"]["files"]["catalog"].endswith("references/ai-tells-en.md"))
+        self.assertTrue(out["langs"]["ru"]["files"]["catalog"].endswith("references/ai-tells-ru.md"))
+
+    def test_ack_goes_to_ledger_of_language_skill(self):
+        en = revizor.SKILLS_DIR / "writing-en"
+        (en / "references").mkdir(parents=True)
+        (en / "references" / "ai-tells-en.md").write_text("", encoding="utf-8")
+        revizor.CONFIG.write_text(json.dumps({"style_skill": {"en": str(en)}}), encoding="utf-8")
+        r = revizor.load(self.doc)
+        r["items"].append({"id": "f", "kind": "edit", "scope": "text", "quote": "not X, it is Y", "replacement": "Y", "state": "applied"})
+        revizor.save(self.doc, r)
+        out = json.loads(self.cli("pairs"))
+        self.assertEqual(out["langs"]["en"]["skill"]["name"], "writing-en")
+        self.cli("pairs", "--ack")
+        en_seen = json.loads((en / "revizor-learned.json").read_text(encoding="utf-8"))["seen"]
+        ru_seen = json.loads(Path(out["langs"]["ru"]["files"]["ledger"]).read_text(encoding="utf-8"))["seen"]
+        self.assertEqual(len(en_seen), 1)
+        self.assertEqual(len(ru_seen), 3)
+        self.assertEqual(self.cli("pairs", "--count").strip(), "0")  # разобранное видно по обоим журналам
 
     def test_skill_files_follow_existing_layout(self):
         d = revizor.SKILLS_DIR / "writing-style" / "references"

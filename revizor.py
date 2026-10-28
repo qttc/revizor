@@ -35,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-__version__ = "0.8.2"
+__version__ = "0.9.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -188,6 +188,7 @@ def pending(review: dict) -> list:
 LOCKS = Path.home() / ".cache" / "revizor" / "locks"
 TEXTS = Path.home() / ".cache" / "revizor" / "text"  # текст страницы для смысловой проверки: у бандла и HTML его видит только страница
 REOPEN_WAIT = 4  # с: вкладка опрашивает сервер раз в 1,5 с
+WAIT_GRACE = 10  # с: столько wait ждёт, что завершённое ревью откроют снова
 CTX = 32
 
 
@@ -366,6 +367,20 @@ def cmd_update(args) -> int:
 # ---------- скилл стиля ----------
 # Настраивать ничего не нужно: Ревизор сам находит скилл, по которому пишет агент. Явный путь – переменная
 # REVIZOR_STYLE_SKILL или "style_skill" в ~/.config/revizor/config.json, если автопоиск ошибся.
+# Скиллы под разные языки: "style_skill": {"ru": "...", "en": "..."}.
+
+def text_lang(text: str) -> str:
+    """Язык текста по преобладающему алфавиту: кириллица – ru, латиница – en."""
+    cyr = len(re.findall(r"[а-яё]", text, re.I))
+    return "ru" if cyr >= len(re.findall(r"[a-z]", text, re.I)) else "en"
+
+
+def doc_lang(doc: Path) -> str:
+    raw = doc.read_text(encoding="utf-8", errors="replace")
+    if kind(doc) == "html":  # скрипты и стили не текст, в бандле там ещё и сжатые слайды латиницей
+        raw = re.sub(r"<(script|style)\b.*?</\1>|<[^>]+>", " ", raw, flags=re.S | re.I)
+    return text_lang(raw)
+
 
 def _skill_score(d: Path) -> int:
     if (d / "revizor.json").is_file():
@@ -389,17 +404,22 @@ def config() -> dict:
         return {}
 
 
-def find_style_skill(min_score: int = 30):
+def find_style_skill(min_score: int = 30, lang=None):
     """Скилл стиля владельца: {"name", "path"} или None. Свой скилл Ревизора в кандидаты не идёт.
-    min_score 20 – «слабый» скилл: только SKILL.md про стиль, без каталога и примеров."""
+    min_score 20 – «слабый» скилл: только SKILL.md про стиль, без каталога и примеров.
+    lang – язык документа: style_skill по языкам выбирает свой скилл, языка в нём нет – автопоиск."""
     explicit = os.environ.get("REVIZOR_STYLE_SKILL") or config().get("style_skill")
+    taken = set()  # скиллы, заданные под другие языки, автопоиск не берёт
+    if isinstance(explicit, dict):
+        taken = {Path(v).expanduser().resolve() for k, v in explicit.items() if k != (lang or "ru") and isinstance(v, str)}
+        explicit = explicit.get(lang or "ru")
     if explicit:
         d = Path(explicit).expanduser()
         return {"name": d.name, "path": str(d)} if d.is_dir() else None
     best, top = None, 0
     for d in sorted(SKILLS_DIR.glob("*")) if SKILLS_DIR.is_dir() else []:
         real = d.resolve()
-        if not real.is_dir() or real == (ROOT / "skill").resolve():
+        if not real.is_dir() or real == (ROOT / "skill").resolve() or real in taken:
             continue
         sc = _skill_score(real)
         if sc > top:
@@ -425,9 +445,11 @@ def load_rules(skill=None) -> dict:
     return {"skill": skill, "rules": list(rules.values())}
 
 
-def skill_files(skill: dict) -> dict:
-    """Роли файлов скилла стиля. revizor.json задаёт их явно, иначе – раскладка как у канона стиля: references/examples.md,
-    каталог примет references/*tells*.md, голос references/voice.md. Файла может ещё не быть – его создаст обучение."""
+def skill_files(skill: dict, lang: str = "ru") -> dict:
+    """Роли файлов скилла стиля для языка документа. revizor.json задаёт их явно – путём или по языкам
+    ({"ru": "...", "en": "..."}), иначе – раскладка как у канона стиля: references/examples.md, каталог примет
+    references/*tells-<lang>*.md (или общий *tells*.md без языка), голос references/voice.md. Файла может ещё не быть –
+    его создаст обучение."""
     d = Path(skill["path"])
     manifest = {}
     if (d / "revizor.json").is_file():
@@ -435,10 +457,15 @@ def skill_files(skill: dict) -> dict:
             manifest = json.loads((d / "revizor.json").read_text(encoding="utf-8")).get("files", {})
         except (OSError, ValueError):
             manifest = {}
-    tells = sorted(d.glob("references/*tells-ru*.md")) or sorted(d.glob("references/*tells*.md"))
-    roles = {"examples": "references/examples.md", "catalog": str(tells[0].relative_to(d)) if tells else "references/ai-tells-ru.md",
+    tells = sorted(d.glob(f"references/*tells-{lang}*.md")) or \
+        [p for p in sorted(d.glob("references/*tells*.md")) if not re.search(r"tells-[a-z]{2}(?![a-z])", p.name)]
+    roles = {"examples": "references/examples.md",
+             "catalog": str(tells[0].relative_to(d)) if tells else f"references/ai-tells-{lang}.md",
              "voice": "references/voice.md", "rules": "revizor-rules.json", "ledger": "revizor-learned.json"}
-    roles.update({k: v for k, v in manifest.items() if isinstance(v, str)})
+    for k, v in manifest.items():
+        v = v.get(lang) if isinstance(v, dict) else v
+        if isinstance(v, str):
+            roles[k] = v
     return {k: str(d / v) for k, v in roles.items()}
 
 
@@ -512,7 +539,7 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", se
     doc = doc.resolve()
     lock = threading.Lock()
     if skill == "auto":
-        skill = find_style_skill()
+        skill = find_style_skill(lang=doc_lang(doc))
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -674,8 +701,8 @@ def collect_pairs(ledger: dict, extra=()) -> dict:
             before, after = i.get("quote", ""), i.get("replacement", "")
             if re.sub(r"\s+", " ", before).strip() == re.sub(r"\s+", " ", after).strip():
                 continue
-            entry = {"key": key, "doc": review.get("doc"), "register": review.get("register"), "before": before, "after": after,
-                     "why": i.get("why") or "", "where": i.get("where") or ""}
+            entry = {"key": key, "doc": review.get("doc"), "register": review.get("register"), "lang": text_lang(f"{before} {after}"),
+                     "before": before, "after": after, "why": i.get("why") or "", "where": i.get("where") or ""}
             if i.get("rule"):
                 entry["rule"], entry["source"] = i["rule"], i.get("source", "radar")
             # чистая механика из проверки («Исправить» без ручной правки) – подтверждение правила, а не новый пример
@@ -683,7 +710,8 @@ def collect_pairs(ledger: dict, extra=()) -> dict:
         for d in review.get("dismissed", []):
             key = sha(f"{f}#x:{d.get('rule')}:{d.get('prefix', '')}{d.get('quote', '')}")
             if key not in seen:
-                dismissed.append({"key": key, "doc": review.get("doc"), "rule": d.get("rule"), "quote": d.get("quote"), "before": d.get("prefix")})
+                dismissed.append({"key": key, "doc": review.get("doc"), "rule": d.get("rule"), "quote": d.get("quote"), "before": d.get("prefix"),
+                                  "lang": text_lang(f"{d.get('prefix', '')}{d.get('quote', '')}")})
     return {"pairs": pairs, "dismissed": dismissed, "confirmed": confirmed}
 
 
@@ -697,6 +725,22 @@ def learn_allowed() -> bool:
     return cwd == base or base in cwd.parents
 
 
+LANGS = ("ru", "en")
+
+
+def lang_skill(lang=None):
+    """Скилл стиля для языка и создан ли он сейчас. Нет своего – слабый (только SKILL.md про стиль), нет и его – из шаблона."""
+    skill = find_style_skill(lang=lang) or find_style_skill(min_score=20, lang=lang)
+    return (skill, False) if skill else (init_style_skill(), True)
+
+
+def read_ledger(path: Path) -> dict:
+    ledger = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"seen": [], "stats": {}}
+    # журналы до 0.8.0 хранили путь#id – перевести в хэши
+    ledger["seen"] = [k if re.fullmatch(r"[0-9a-f]{16}", k) else sha(k) for k in ledger.get("seen", [])]
+    return ledger
+
+
 def cmd_pairs(args) -> int:
     """Порция для обучения скилла стиля. Нет скилла – подключается слабый (только SKILL.md про стиль) или создаётся
     из шаблона: настраивать ничего не нужно."""
@@ -707,38 +751,50 @@ def cmd_pairs(args) -> int:
         print(f"Обучение скилла стиля запускается из {where} (learn_from в {CONFIG}). Пары копятся, их заберёт обучение оттуда.",
               file=sys.stderr)
         return 0 if args.count else 3
-    skill, created = find_style_skill() or find_style_skill(min_score=20), False
-    if not skill:
-        skill, created = init_style_skill(), True
-    files = skill_files(skill)
-    ledger_path = Path(files["ledger"])
-    ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.is_file() else {"seen": [], "stats": {}}
-    # журналы до 0.8.0 хранили путь#id – перевести в хэши
-    ledger["seen"] = [k if re.fullmatch(r"[0-9a-f]{16}", k) else sha(k) for k in ledger.get("seen", [])]
+    skill, created = lang_skill()
+    # скиллы по языкам могут быть разными: журнал у каждого свой, разобранное ищется по всем
+    skills = {l: find_style_skill(lang=l) or find_style_skill(min_score=20, lang=l) or skill for l in LANGS}
+    ledgers = {}
+    for l, sk in skills.items():
+        path = Path(skill_files(sk, l)["ledger"])
+        ledgers.setdefault(str(path), read_ledger(path))
     if args.ack:
         if not BATCH.is_file():
             print("Нечего отмечать: порции нет. Сначала revizor.py pairs.")
             return 1
         batch = json.loads(BATCH.read_text(encoding="utf-8"))
-        stats = ledger.setdefault("stats", {})
+        touched = set()
         for kind, field in (("pairs", "taken"), ("confirmed", "taken"), ("dismissed", "dismissed")):
             for e in batch.get(kind, []):
+                path = skill_files(skills.get(e.get("lang"), skill), e.get("lang") or "ru")["ledger"]
+                ledger = ledgers.setdefault(path, read_ledger(Path(path)))
+                touched.add(path)
                 for rule in filter(None, (e.get("rule") or "").split(",")):
-                    stats.setdefault(rule, {"taken": 0, "dismissed": 0})[field] += 1
-        ledger["seen"] = sorted(set(ledger.get("seen", [])) | {e["key"] for k in ("pairs", "dismissed", "confirmed") for e in batch.get(k, [])})
-        ledger["updated"] = now()
-        ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+                    ledger.setdefault("stats", {}).setdefault(rule, {"taken": 0, "dismissed": 0})[field] += 1
+                ledger["seen"] = sorted(set(ledger.get("seen", [])) | {e["key"]})
+        for path in touched:
+            ledgers[path]["updated"] = now()
+            Path(path).write_text(json.dumps(ledgers[path], ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
         BATCH.unlink()
-        print(f"В журнал скилла {skill['name']}: {sum(len(batch.get(k, [])) for k in ('pairs', 'dismissed', 'confirmed'))} записей.")
+        names = ", ".join(sorted({sk["name"] for l, sk in skills.items()
+                                  if skill_files(sk, l)["ledger"] in touched})) or skill["name"]
+        print(f"В журнал скилла {names}: {sum(len(batch.get(k, [])) for k in ('pairs', 'dismissed', 'confirmed'))} записей.")
         return 0
-    got = collect_pairs(ledger, args.dir or ())
+    got = collect_pairs({"seen": sorted({k for lg in ledgers.values() for k in lg.get("seen", [])})}, args.dir or ())
     total = len(got["pairs"]) + len(got["dismissed"]) + len(got["confirmed"])
     if not args.count and total > args.max:  # первая порция после обновления бывает большой: остальное – в следующий раз
         left = args.max
         for k in ("pairs", "dismissed", "confirmed"):
             got[k], left = got[k][:left], max(0, left - len(got[k][:left]))
-    out = {"skill": skill, "created": created, "files": files, "playbook": str(ROOT / "skill" / "learn.md"),
-           "stats": ledger.get("stats", {}), **got}
+    present = [e.get("lang", "ru") for k in ("pairs", "dismissed", "confirmed") for e in got[k]]
+    main_lang = max(sorted(set(present)), key=present.count) if present else "ru"
+    langs = {}
+    for l in sorted(set(present)):
+        files = skill_files(skills[l], l)
+        langs[l] = {"skill": skills[l], "files": files, "stats": ledgers[files["ledger"]].get("stats", {})}
+    files = skill_files(skills[main_lang], main_lang)
+    out = {"skill": skills[main_lang], "created": created, "files": files, "langs": langs,
+           "playbook": str(ROOT / "skill" / "learn.md"), "stats": ledgers[files["ledger"]].get("stats", {}), **got}
     CACHE.mkdir(parents=True, exist_ok=True)
     BATCH.write_text(json.dumps(got, ensure_ascii=False), encoding="utf-8")
     if args.count:
@@ -851,17 +907,26 @@ def take_sent(doc: Path):
 
 def scan_task(doc: Path, review: dict) -> str:
     """Задание агенту на смысловую проверку: где текст, по какому каталогу искать, что уже поймали регулярки."""
-    skill = find_style_skill()
-    catalog = None
-    if skill:
-        tells = sorted(Path(skill["path"]).glob("references/*tells-ru*.md")) or sorted(Path(skill["path"]).glob("references/*tells*.md"))
-        catalog = tells[0] if tells else None
-    catalog = catalog or RULES_DIR / "semantic-ru.md"
+    try:
+        roots = json.loads(text_cache(doc).read_text(encoding="utf-8"))["roots"]
+        lang = text_lang(" ".join(r.get("text", "") for r in roots))
+    except (OSError, ValueError, KeyError):
+        lang = doc_lang(doc)
+    skill = find_style_skill(lang=lang)
+    catalog = Path(skill_files(skill, lang)["catalog"]) if skill else None
+    if catalog and catalog.is_file():
+        where = f" (скилл {skill['name']})"
+    else:
+        catalog = RULES_DIR / f"semantic-{lang}.md"
+        where = " (базовый Ревизора)"
+        if not catalog.is_file():
+            catalog, where = RULES_DIR / "semantic-ru.md", f" (базовый Ревизора, на русском: каталога на {lang} нет, приметы искать по смыслу)"
     base = ", ".join(r["id"] for r in load_rules(skill)["rules"])
     return "\n".join([
         f"Проверка на нейрослоп: {doc}",
         f"Текст страницы: {text_cache(doc)} (roots[].key – корень: \"\" страница, иначе фрейм слайда)",
-        f"Каталог примет: {catalog}" + (f" (скилл {skill['name']})" if skill else " (базовый Ревизора)"),
+        f"Язык: {lang}",
+        f"Каталог примет: {catalog}{where}",
         f"Регистр: {review.get('register') or 'определить по тексту'}",
         f"Уже ловят регулярки, не повторять: {base}",
         "Найти смысловые приметы по разделу «Проверка на нейрослоп» скилла revizor, записать: "
@@ -913,8 +978,13 @@ def cmd_wait(args) -> int:
     """Live Edit: ждёт, пока владелец отправит правку из редактора, и выходит со сводкой. Агент применяет, отмечает
     и запускает `wait` снова. Ревью закончено или сервер остановлен – выход без правок, цикл заканчивается."""
     doc = Path(args.file).expanduser().resolve()
+    # wait стартует вместе с повторным open: пока open не открыл ревью заново, в файле ещё старый «завершено»
+    grace = time.monotonic() + WAIT_GRACE
     while True:
         got = take_sent(doc)
+        if got is None and time.monotonic() < grace:
+            time.sleep(args.interval)
+            continue
         if got is None:
             print(f"Ревью {doc.name} завершено, Live Edit остановлен. Оставшиеся правки – в выводе open.")
             return 0
