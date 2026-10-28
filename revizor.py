@@ -40,7 +40,7 @@ try:
 except ImportError:  # Windows: блокировки файла правок на fcntl, без них два процесса потеряют правки
     fcntl = None
 
-__version__ = "0.9.0"
+__version__ = "1.0.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -420,6 +420,12 @@ def config() -> dict:
         return {}
 
 
+def ui_lang():
+    """Язык панели: REVIZOR_UI_LANG главнее ui_lang из настроек. Не задан – None, страница выберет по языку браузера."""
+    v = str(os.environ.get("REVIZOR_UI_LANG") or config().get("ui_lang") or "").strip().lower()
+    return v if v in ("ru", "en") else None
+
+
 def find_style_skill(min_score: int = 30, lang=None):
     """Скилл стиля владельца: {"name", "path"} или None. Свой скилл Ревизора в кандидаты не идёт.
     min_score 20 – «слабый» скилл: только SKILL.md про стиль, без каталога и примеров.
@@ -683,7 +689,7 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
                 with lock:
                     review = load(doc)
                 self.send_json({"doc": {"name": doc.name, "path": str(doc), "type": kind(doc), "sha": sha(text)},
-                                "review": review, "update": update})
+                                "review": review, "update": update, "ui_lang": ui_lang()})
             else:
                 self.send(404, b"not found", "text/plain")
 

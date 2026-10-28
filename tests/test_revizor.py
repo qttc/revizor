@@ -50,6 +50,33 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(data["doc"]["type"], "md")
         self.assertEqual(data["review"]["items"], [])
 
+    def test_state_carries_ui_lang_from_config_and_env(self):
+        saved = (revizor.CONFIG, os.environ.pop("REVIZOR_UI_LANG", None))
+        def restore():
+            revizor.CONFIG = saved[0]
+            os.environ.pop("REVIZOR_UI_LANG", None)
+            if saved[1] is not None:
+                os.environ["REVIZOR_UI_LANG"] = saved[1]
+        self.addCleanup(restore)
+        revizor.CONFIG = Path(self.tmp.name) / "config.json"
+        state = lambda: json.loads(urllib.request.urlopen(self.base + "/api/state").read())
+        self.assertIsNone(state()["ui_lang"])  # не задан – страница выберет по языку браузера
+        revizor.CONFIG.write_text(json.dumps({"ui_lang": "en"}), encoding="utf-8")
+        self.assertEqual(state()["ui_lang"], "en")
+        os.environ["REVIZOR_UI_LANG"] = "ru"  # переменная окружения главнее настройки
+        self.assertEqual(state()["ui_lang"], "ru")
+        os.environ["REVIZOR_UI_LANG"] = "de"  # неизвестный язык не передаётся
+        revizor.CONFIG.write_text(json.dumps({"ui_lang": "fr"}), encoding="utf-8")
+        self.assertIsNone(state()["ui_lang"])
+
+    def test_overlay_has_english_dictionary(self):
+        js = urllib.request.urlopen(self.base + "/_revizor/overlay.js").read().decode()
+        for s in ("const EN = {", '"Отправить агенту": "Send to agent"', '"Нейрослоп": "AI slop"', "state.ui_lang", "title_en", "why_en"):
+            self.assertIn(s, js)
+        # строка, которую разбирает агент, остаётся русской в любом языке панели
+        self.assertIn('it.comment = "Переписать без нейрослопа: "', js)
+        self.assertNotIn("—", js[js.index("const EN = {"):js.index("const tr = ")])  # в английских строках нет em dash
+
     def test_text_shell_keeps_text_and_loads_overlay(self):
         page = urllib.request.urlopen(self.base + "/").read().decode()
         self.assertIn('data-revizor-mode="md"', page)
@@ -527,6 +554,11 @@ class StyleSkillTest(unittest.TestCase):
     def test_base_rules_are_complete(self):
         for r in revizor.load_rules()["rules"]:
             self.assertTrue(r["id"] and r["title"] and r["pattern"] and r["why"], r)
+
+    def test_base_rules_have_english_title_and_why(self):
+        for r in json.loads((revizor.RULES_DIR / "ru.json").read_text(encoding="utf-8"))["rules"]:
+            self.assertTrue(r.get("title_en") and r.get("why_en"), r["id"])
+            self.assertNotIn("—", r["title_en"] + r["why_en"], r["id"])
 
 
 class RadarServerTest(ServerTest.__base__):

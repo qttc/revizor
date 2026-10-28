@@ -1,6 +1,6 @@
 # Ревизор: техническое описание
 
-Для тех, кто правит сам Ревизор или пишет агента, который с ним работает. Что это и зачем – в [README](../README.md).
+Для тех, кто правит сам Ревизор или пишет агента, который с ним работает. Что это и зачем – в [README](../README.ru.md) ([English](../README.md)).
 
 ## Команды
 
@@ -107,7 +107,8 @@ python3 revizor.py --version
 - `show --json` и JSON на выходе `pairs`;
 - формат `*.review.json` версии 1 по [схеме](review.schema.json). Новые необязательные поля могут появляться в минорных версиях, читатель их пропускает;
 - манифест скилла `revizor.json`, правила `revizor-rules.json`, журнал `revizor-learned.json`;
-- ключи `~/.config/revizor/config.json` (`style_skill`, `learn_from`) и переменные `REVIZOR_STYLE_SKILL`, `REVIZOR_NO_UPDATE_CHECK`.
+- ключи `~/.config/revizor/config.json` (`style_skill`, `learn_from`, `ui_lang`) и переменные `REVIZOR_STYLE_SKILL`, `REVIZOR_NO_UPDATE_CHECK`, `REVIZOR_UI_LANG`;
+- поля правил `id`, `title`, `why`, `pattern`, `flags`, `lang`, `fix`, `off`, `title_en`, `why_en`.
 
 Внутреннее, меняется без предупреждения:
 - текстовые сводки `open`, `wait`, `show` без `--json`. Их читает агент по скиллу, скилл обновляется вместе с ними;
@@ -117,6 +118,7 @@ python3 revizor.py --version
 ## Устройство
 
 - `revizor.py` – сервер на `http.server` и CLI. Слушает только `127.0.0.1` и раздаёт только папку документа, без скрытых файлов и папок. Файлы правок `*.review.json` закрыты даже внутри неё, без учёта регистра. Запросы с чужим Host отклоняются (DNS-rebinding), POST – только `application/json` со своим Origin. Тело до 10 МБ. Запись в файл правок атомарная: через временный файл и `replace`.
+- Язык панели: `REVIZOR_UI_LANG`, иначе `ui_lang` в `~/.config/revizor/config.json`, иначе язык браузера (`ru*` – русский, остальное – английский). Сервер отдаёт настройку в `/api/state`. Строки, которые уходят агенту в файл правок (комментарий «Переписать без нейрослопа: …», подписи блоков, «почему» у правки из проверки), всегда русские: их разбирает скилл. У правил есть необязательные `title_en` и `why_en` для английской панели.
 - `web/shell.css`, `web/markdown.css` – страница для `.md` и `.txt`, сервер вставляет их в `<style>`. `lang` страницы – по языку документа.
 - `web/overlay.js` – слой правок, один файл без сборки. Панель живёт в shadow DOM, стили страницы её не задевают. Подсветка – CSS Custom Highlight API (Chrome 105+), DOM документа не меняется. За подменой `<html>` и догрузкой текста в слайдах следит `MutationObserver`.
 - `web/vendor/` – Motion 11.11.17 (MIT), Playfair Display, кириллица и латиница (OFL), и парсер Markdown. Сервер отдаёт Motion вместе со слоем в обёртке: AMD и CommonJS страницы он не видит, её `window.Motion` не трогает, слою достаётся как `window.__revizorMotion`. Без Motion анимации идут через Web Animations API. При `prefers-reduced-motion` остаются только прозрачность и цвет.

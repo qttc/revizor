@@ -1,82 +1,94 @@
-# Ревизор
+# Revizor – edit AI-written documents in the browser, then let Claude Code apply your edits
 
-Мини-тула для правки текстов. Открываешь отчёт или дек и переписываешь как тебе нравится. Агент забирает правки и применяет их.
+[![tests](https://github.com/qttc/revizor/actions/workflows/test.yml/badge.svg)](https://github.com/qttc/revizor/actions/workflows/test.yml)
+[![release](https://img.shields.io/github/v/release/qttc/revizor)](https://github.com/qttc/revizor/releases)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-![Ревизор: документ слева, правки справа](docs/screenshot.png)
+English · [Русский](README.ru.md)
 
-## Зачем
+Revizor is a local review editor for [Claude Code](https://claude.com/claude-code). You open a report, a deck or a Markdown file the agent wrote, rewrite the parts you don't like right on the page, and the agent applies your edits to the source file. It also flags AI slop in the text and learns your writing style from the edits you make.
 
-ИИ генерирует много нейрослопа. Править это через чат неэффективно: постоянно приходится ссылаться на абзацы и маркеры, объяснять, где нужно сделать замену.
+![Revizor: the document on the left, edits on the right](docs/screenshot-en.png)
 
-В Ревизоре правишь прямо в документе. Он выглядит так, как его увидит читатель, и сразу видно, где будет правка. Пары «было → стало» находятся рядом с документом, из них потом собираются примеры для скилла стиля.
+## Why
 
-## Как работает
+Fixing an AI draft through chat is slow. You quote a paragraph, explain where the change goes, and check whether the agent changed the right sentence. In Revizor you edit the page as the reader will see it. Every edit is stored with its exact place in the document, so the agent applies it in the right spot without guessing.
 
-1. В Claude Code пишешь `/revizor` или «открой в редакторе». Открывается Chrome: документ слева, Ревизор справа. Путь к файлу нужен, только если агент не знает, какой документ открыть.
-2. Вносишь изменения:
-   - выделил фразу → «Изменить» – помечаешь правки для ИИ;
-   - выделил фразу → «Комментарий» – просьба к этому месту;
-   - «Выбрать блок» → комментарий к абзацу текста, графику, картинке, таблице;
-   - «Общий комментарий» → про весь документ, например «замени стиль» или «поправь заголовки».
-3. Жмёшь «Завершить ревью». Агент применяет правки, отчитывается, что сделал и что отклонил, и открывает новую версию в той же вкладке. Можно сразу на второй круг.
+## How it works
 
-Правки сохраняются сами в `отчёт.review.json` рядом с документом. Закрыл вкладку без «Завершить ревью» – напиши агенту «поправь», он заберёт их из файла. Формат текста (отчёт, дек, Slack, спека, письмо) Ревизор определяет сам, поменять можно в шапке.
+1. In Claude Code, type `/revizor` or "open it in the editor". Chrome opens with the document on the left and the Revizor panel on the right.
+2. Make your edits:
+   - select a phrase → **Edit** and type your version;
+   - select a phrase → **Comment** to ask for a change in that spot;
+   - **Pick a block** to comment on a paragraph, chart, image or table;
+   - **General comment** for the whole document, for example "shorter headings".
+3. Click **Finish review**. The agent applies the edits, tells you what it changed and what it skipped, and reloads the new version in the same tab for a second pass.
 
-**Live Edit (бета).** Режим включается в шапке панели. У каждой правки появляется кнопка «Отправить агенту»: агент применяет правку сразу, и документ на странице обновляется сам.
+Edits are saved as you go to `report.review.json` next to the document. If you close the tab before you finish, tell the agent "apply the edits" and it picks them up from that file.
 
-## Проверка на нейрослоп
+**Live Edit (beta).** Turn it on in the panel header and every edit gets a **Send to agent** button. The agent applies that one edit, and the page updates without a reload.
 
-Документ открылся – Ревизор сразу подчёркивает красной волной обороты, по которым видно нейросеть: «не про X», «X, не Y», длинное тире, филлеры, «Однако,» с запятой. В панели они собраны по предложениям. «Исправить» правит механику сразу, «Переписать» даёт предложение в правку, «Агенту» просит переписать его. Крестик – «это не нейрослоп», больше это место не покажется.
+## AI slop check
 
-Пока ты читаешь, агент проходит текст по смыслу: мораль под абзацем, «дело не в X, дело в Y», «подход позволяет…, обеспечивая…». Такие места появляются в той же группе с готовым вариантом – «Принять» или «Поправить».
+When a document opens, Revizor underlines phrases that give away a language model. On English text that means em dashes and Claude phrasing such as "less like X, more like Y", "matters because" or "without sacrificing". Russian text gets a longer rule set. The panel groups the hits by sentence: **Fix** corrects mechanical issues on the spot, **Rewrite** turns the sentence into an edit, **To agent** sends it to the agent. Mark a false positive with ✕ and it won't show again.
 
-Правила и каталог примет берутся из твоего скилла стиля, если он есть в Claude Code: Ревизор находит его сам.
+While you read, the agent goes through the text for patterns a regex can't catch: a moral line under each paragraph, "it's not X, it's Y" contrasts, "-ing" tails that add nothing. Its findings show up in the same panel with a suggested rewrite you can accept or adjust.
 
-Английские тексты проверяются по английскому каталогу. Язык Ревизор определяет по тексту документа, а скилл под каждый язык может быть свой.
+The rules and the catalog of patterns come from your own style skill in Claude Code if you have one; Revizor finds it on its own and picks the catalog by the document language.
 
-## Скилл стиля учится на правках
+## Learns your writing style
 
-Каждая правка «было → стало» учит скилл, по которому агент пишет тексты. Повтор приёма, который уже знаком, только подтверждает его, новый приём сначала копится кандидатом и становится правилом после трёх случаев в разных документах. Слово, которое ты раз за разом меняешь, превращается в правило проверки. Если проверка ошибается и ты её отклоняешь, правило сужается или выключается.
+Every "before → after" edit teaches the skill the agent writes with. An edit that matches a known pattern confirms it. A new pattern becomes a rule after it shows up three times in different documents. A word you keep replacing turns into an automatic check, and a check you keep dismissing gets narrowed or switched off.
 
-Обучение запускается само после ревью, когда накопилось 5 новых правок. Если скилла стиля у тебя нет, Ревизор создаст его сам в `~/.claude/skills/writing-style`, и дальше агент будет писать по нему все тексты для людей. Рабочие названия и цифры в скилл не попадают, только форма правки.
+Learning runs after a review once 5 new edits have piled up. If you don't have a style skill, Revizor creates one in `~/.claude/skills/writing-style`. Product names and numbers from your documents stay out of the skill; only the shape of the edit goes in.
 
-## Поддерживаемые форматы
+## Supported formats
 
-- HTML – отчёты, деки, слайды во фреймах, самораспаковывающиеся экспорты.
-- Markdown – «Оформление», как увидит читатель, или «Текст» с разметкой.
-- TXT.
+- HTML: reports, decks, slides in iframes, self-unpacking exports.
+- Markdown, shown rendered or as source.
+- Plain text.
 
-## Установка
+## Install
+
+You need macOS or Linux, Python 3.9+, Chrome and Claude Code. Nothing else to install.
 
 ```
 git clone https://github.com/qttc/revizor.git
 revizor/install.sh
 ```
 
-Нужны macOS или Linux, Python 3.9+, Chrome и Claude Code, остальное лежит в репо. `install.sh` подключает скилл `/revizor`.
-
-Или вставь в Claude Code этот промпт, в приложении или в терминале, и Claude поставит всё сам:
+`install.sh` links the `/revizor` skill into `~/.claude/skills`. Or paste this prompt into Claude Code, in the app or in the terminal, and Claude sets everything up:
 
 ```
-Установи мне Ревизор – редактор правок для Claude Code: https://github.com/qttc/revizor
+Install Revizor, a review editor for Claude Code: https://github.com/qttc/revizor
 
-1. Проверь, что есть python3 версии 3.9 или новее и Google Chrome. Чего-то нет – скажи и остановись.
-2. Склонируй репо в ~/revizor. Папка уже есть и это клон того же репо – сделай git pull.
-3. Запусти ~/revizor/install.sh. Он подключит скилл /revizor.
-4. Проверь: создай тестовый test.md во временной папке и открой его по скиллу revizor.
-5. Отчитайся одной строкой, что установлено, и скажи, как мной пользоваться: «/revizor <путь к файлу>» или «открой в редакторе».
+1. Check that python3 3.9 or newer and Google Chrome are installed. If something is missing, tell me and stop.
+2. Clone the repo into ~/revizor. If the folder exists and is a clone of the same repo, run git pull.
+3. Run ~/revizor/install.sh. It links the /revizor skill.
+4. Test it: create test.md in a temp folder and open it with the revizor skill.
+5. Tell me in one line what was installed and how to use it: "/revizor <file>" or "open it in the editor".
 ```
 
-`/revizor` не появился в списке команд – открой новую сессию: скиллы подхватываются при её старте.
+If `/revizor` doesn't show up in the command list, start a new session: skills load when a session starts.
 
-## Удаление
+## Update and uninstall
 
-`revizor/install.sh --uninstall` снимает скилл и перечисляет, что осталось на диске: клон, кэш, файлы правок рядом с документами.
+When a new release is out, the agent offers to update the next time you run `/revizor`. To update by hand, tell the agent "update revizor" or run `python3 revizor.py update`.
 
-## Обновление
+`revizor/install.sh --uninstall` removes the skill and lists what is left on disk: the clone, the cache and the review files next to your documents.
 
-Вышла новая версия – агент предложит обновиться при запуске `/revizor`. Вручную – написать агенту «обнови ревизор» или `python3 revizor.py update`.
+## Privacy
 
-Документ и правки с компьютера не уходят. В сеть Ревизор ходит раз в сутки проверить версию, выключается `REVIZOR_NO_UPDATE_CHECK=1`.
+Documents and edits stay on your machine. The editor server listens on `127.0.0.1` only and accepts requests from its own tab. Once a day Revizor runs `git ls-remote` against this repo to check for a new release; `REVIZOR_NO_UPDATE_CHECK=1` turns that off. See [SECURITY.md](SECURITY.md).
 
-Команды, формат файла правок и устройство – в [docs/technical.md](docs/technical.md).
+## FAQ
+
+**Does it work without Claude Code?** The editor and the review file work on their own: `python3 revizor.py open report.md` opens the page, and `revizor.py show report.md` prints the edits. Applying edits and the slop check by meaning need an agent that follows `skill/SKILL.md`.
+
+**Is the interface in English?** Yes. It follows your browser language. Set `"ui_lang": "en"` or `"ru"` in `~/.config/revizor/config.json` to pin it.
+
+**Can other tools read the edits?** Yes. The review file format is stable from 1.0.0 and has a [JSON Schema](docs/review.schema.json). Commands, the file format and internals are described in [docs/technical.md](docs/technical.md) (in Russian).
+
+## License
+
+[MIT](LICENSE)
