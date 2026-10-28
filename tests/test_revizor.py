@@ -1,3 +1,4 @@
+import http.client
 import io
 import json
 import os
@@ -10,7 +11,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -124,6 +125,108 @@ class ServerTest(unittest.TestCase):
         post(self.base + "/api/review", {"items": [self.edit("new")]})
         ids = {i["id"]: i["state"] for i in revizor.load(self.doc)["items"]}
         self.assertEqual(ids, {"old": "applied", "new": "pending"})
+
+
+class HardeningTest(ServerTest.__base__):
+    """Сервер на 127.0.0.1 доступен любой вкладке браузера: чужие сайты, DNS-rebinding, кривые запросы."""
+
+    setUp, tearDown, edit = ServerTest.setUp, ServerTest.tearDown, ServerTest.edit
+
+    def raw(self, method, path, body=b"", headers=None):
+        c = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=5)
+        c.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        h = {"Host": f"127.0.0.1:{self.server.server_address[1]}", "Content-Length": str(len(body))}
+        h.update(headers or {})
+        for k, v in h.items():
+            if v is not None:
+                c.putheader(k, v)
+        c.endheaders(body)
+        r = c.getresponse()
+        out = (r.status, r.read())
+        c.close()
+        return out
+
+    def json_post(self, path, body, **headers):
+        return self.raw("POST", path, json.dumps(body).encode(), dict({"Content-Type": "application/json"}, **headers))[0]
+
+    def test_foreign_host_is_refused(self):
+        self.assertEqual(self.raw("GET", "/api/state", headers={"Host": "evil.example"})[0], 403)
+        self.assertEqual(self.raw("GET", "/api/state", headers={"Host": f"localhost:{self.server.server_address[1]}"})[0], 200)
+
+    def test_cross_site_post_is_refused(self):
+        post(self.base + "/api/review", {"items": [self.edit()]})
+        self.assertEqual(self.raw("POST", "/api/review", b'{"items": []}', {"Content-Type": "text/plain"})[0], 403)
+        self.assertEqual(self.json_post("/api/review", {"items": []}, Origin="https://evil.example"), 403)
+        self.assertEqual(self.json_post("/api/done", {"items": []}, **{"Sec-Fetch-Site": "cross-site"}), 403)
+        self.assertEqual(len(revizor.load(self.doc)["items"]), 1)
+        self.assertFalse(self.done.is_set())
+        self.assertEqual(self.json_post("/api/review", {"items": []}, Origin=self.base, **{"Sec-Fetch-Site": "same-origin"}), 200)
+
+    def test_hidden_files_and_sidecars_are_closed(self):
+        d = Path(self.tmp.name)
+        (d / "sub" / ".git").mkdir(parents=True)
+        (d / "sub" / ".git" / "config").write_text("secret", encoding="utf-8")
+        (d / ".env").write_text("TOKEN=1", encoding="utf-8")
+        (d / "other.review.json").write_text("{}", encoding="utf-8")
+        (d / "img.png").write_bytes(b"png")
+        for path in ("/doc/sub/.git/config", "/doc/.env", "/doc/OTHER.REVIEW.JSON", "/doc/other.review.json.tmp"):
+            self.assertEqual(self.raw("GET", path)[0], 404, path)
+        self.assertEqual(self.raw("GET", "/doc/img.png"), (200, b"png"))
+        self.assertEqual(self.raw("GET", "/doc/%00")[0], 400)
+
+    def test_bad_bodies_get_errors_and_server_survives(self):
+        for body in (b"[]", b"{bad", json.dumps({"items": [1]}).encode(), json.dumps({"items": [{"kind": "edit"}]}).encode()):
+            self.assertEqual(self.raw("POST", "/api/review", body, {"Content-Type": "application/json"})[0], 400, body)
+        self.assertEqual(self.raw("POST", "/api/review", b"", {"Content-Type": "application/json", "Content-Length": "-1"})[0], 413)
+        self.assertEqual(self.raw("POST", "/api/scan", b"x" * 10,
+                                  {"Content-Type": "application/json", "Content-Length": str(revizor.MAX_BODY + 1)})[0], 413)
+        self.assertEqual(self.raw("GET", "/api/state")[0], 200)
+
+    def test_broken_sidecar_is_reported_and_kept(self):
+        revizor.sidecar(self.doc).write_text("{не json", encoding="utf-8")
+        status, body = self.raw("GET", "/api/state")
+        self.assertEqual(status, 500)
+        self.assertIn("не читается", json.loads(body)["error"])
+        self.assertEqual(self.json_post("/api/review", {"items": []}), 500)
+        self.assertEqual(revizor.sidecar(self.doc).read_text(encoding="utf-8"), "{не json")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(revizor.main(["show", str(self.doc)]), 2)
+        self.assertIn("не читается", err.getvalue())
+
+
+class SidecarTest(unittest.TestCase):
+    """report.md и его экспорт report.html в одной папке – правки не смешиваются."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_single_doc_keeps_short_name(self):
+        (self.d / "report.md").write_text("x", encoding="utf-8")
+        self.assertEqual(revizor.sidecar(self.d / "report.md").name, "report.review.json")
+
+    def test_twins_get_own_files(self):
+        md, html = self.d / "report.md", self.d / "report.html"
+        md.write_text("x", encoding="utf-8")
+        html.write_text("<p>x</p>", encoding="utf-8")
+        self.assertEqual(revizor.sidecar(md).name, "report.md.review.json")
+        self.assertEqual(revizor.sidecar(html).name, "report.html.review.json")
+
+    def test_old_short_file_stays_with_its_doc(self):
+        md, html = self.d / "report.md", self.d / "report.html"
+        md.write_text("x", encoding="utf-8")
+        r = revizor.load(md)
+        r["items"] = [{"id": "a", "quote": "x", "state": "pending"}]
+        revizor.save(md, r)  # ревью до появления экспорта – короткое имя
+        html.write_text("<p>x</p>", encoding="utf-8")
+        self.assertEqual(revizor.sidecar(md).name, "report.review.json")
+        self.assertEqual(revizor.sidecar(html).name, "report.html.review.json")
+        self.assertEqual(revizor.load(html)["items"], [])
+        self.assertEqual(len(revizor.load(md)["items"]), 1)
 
 
 class HtmlServerTest(unittest.TestCase):

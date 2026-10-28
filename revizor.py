@@ -61,7 +61,42 @@ def now():
 
 
 def sidecar(doc: Path) -> Path:
-    return doc.with_name(doc.stem + ".review.json")
+    """Файл правок рядом с документом: report.md → report.review.json. Рядом есть документ с тем же именем и другим
+    расширением (report.md и его экспорт report.html) – у каждого свой: report.md.review.json. Файл до 1.0, который уже
+    принадлежит этому документу, остаётся на месте."""
+    short, full = doc.with_name(doc.stem + ".review.json"), doc.with_name(doc.name + ".review.json")
+    if full.exists():
+        return full
+    if short.exists():
+        try:
+            owner = json.loads(short.read_text(encoding="utf-8")).get("doc")
+        except (OSError, ValueError, AttributeError):
+            owner = None
+        return short if owner in (None, doc.name) else full
+    twins = [doc.with_suffix(x) for x in TEXT_SUFFIXES | HTML_SUFFIXES if x != doc.suffix.lower()]
+    return full if any(t.exists() for t in twins) else short
+
+
+def is_sidecar(name: str) -> bool:
+    n = name.lower()  # файловая система macOS регистр не различает: REPORT.REVIEW.JSON – тот же файл правок
+    return n.endswith(".review.json") or n.endswith(".review.json.tmp")
+
+
+class BadRequest(Exception):
+    def __init__(self, code: int, msg: str):
+        super().__init__(msg)
+        self.code, self.msg = code, msg
+
+
+class ReviewError(Exception):
+    """Файл правок не читается. Перезаписывать его нельзя: это история правок владельца."""
+
+
+def atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
 
 
 def sha(text: str) -> str:
@@ -160,7 +195,13 @@ html, body {{ margin: 0; background: var(--bg); color: var(--ink); }}
 def load(doc: Path) -> dict:
     p = sidecar(doc)
     if p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
+        try:
+            review = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise ReviewError(f"файл правок {p} не читается ({e}). Почини его или переименуй, тогда начнётся новый.") from e
+        if not isinstance(review, dict) or not isinstance(review.get("items"), list):
+            raise ReviewError(f"файл правок {p} – не формат Ревизора: нет списка items. Переименуй его, тогда начнётся новый.")
+        return review
     return {
         "version": FORMAT_VERSION,
         "doc": doc.name,
@@ -175,21 +216,19 @@ def load(doc: Path) -> dict:
 
 def save(doc: Path, review: dict) -> None:
     review["updated"] = now()
-    p = sidecar(doc)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(review, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(p)
+    atomic_write(sidecar(doc), json.dumps(review, ensure_ascii=False, indent=2) + "\n")
 
 
 def pending(review: dict) -> list:
     return [i for i in review["items"] if i.get("state", "pending") == "pending"]
 
 
-LOCKS = Path.home() / ".cache" / "revizor" / "locks"
-TEXTS = Path.home() / ".cache" / "revizor" / "text"  # текст страницы для смысловой проверки: у бандла и HTML его видит только страница
+LOCKS = CACHE / "locks"
+TEXTS = CACHE / "text"  # текст страницы для смысловой проверки: у бандла и HTML его видит только страница
 REOPEN_WAIT = 4  # с: вкладка опрашивает сервер раз в 1,5 с
 WAIT_GRACE = 10  # с: столько wait ждёт, что завершённое ревью откроют снова
 CTX = 32
+MAX_BODY = 10 * 1024 * 1024  # байт: больше страница не шлёт даже с текстом большого дека
 
 
 def text_cache(doc: Path) -> Path:
@@ -532,7 +571,7 @@ def last_port(doc: Path, port=None):
         return ports.get(key)
     ports[key] = port
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(ports), encoding="utf-8")
+    atomic_write(f, json.dumps(ports))
 
 
 def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", seen=None):
@@ -557,14 +596,65 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", se
             self.send(code, json.dumps(data, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
 
-        def read_json(self):
-            n = int(self.headers.get("Content-Length") or 0)
-            return json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+        def read_json(self) -> dict:
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                raise BadRequest(400, "Content-Length – не число")
+            if n < 0 or n > MAX_BODY:
+                raise BadRequest(413, f"тело запроса больше {MAX_BODY // 1024 // 1024} МБ")
+            try:
+                body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+            except ValueError:
+                raise BadRequest(400, "тело запроса – не JSON")
+            if not isinstance(body, dict):
+                raise BadRequest(400, "тело запроса – не объект JSON")
+            return body
+
+        def allowed(self, post=False) -> bool:
+            """Только своя вкладка. Host закрывает DNS-rebinding, Origin, Sec-Fetch-Site и тип тела – запросы с чужих сайтов:
+            простой POST с text/plain браузер шлёт на 127.0.0.1 без предварительной проверки CORS."""
+            port = self.server.server_address[1]
+            hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+            if self.headers.get("Host") not in hosts:
+                return False
+            if not post:
+                return True
+            origin, site = self.headers.get("Origin"), self.headers.get("Sec-Fetch-Site")
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            return ctype == "application/json" and (origin is None or origin in {f"http://{h}" for h in hosts}) \
+                and site in (None, "same-origin")
 
         def do_GET(self):
+            self.guarded(self.get, post=False)
+
+        def do_POST(self):
+            self.guarded(self.post, post=True)
+
+        def guarded(self, fn, post):
+            if not self.allowed(post):
+                return self.send(403, b"forbidden", "text/plain")
+            try:
+                fn()
+            except BadRequest as e:
+                self.send_json({"ok": False, "error": e.msg}, e.code)
+            except ReviewError as e:
+                self.send_json({"ok": False, "error": str(e)}, 500)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # вкладку закрыли посреди ответа
+            except Exception as e:  # сервер живёт, пока открыт редактор: одна кривая просьба не должна его ронять
+                print(f"revizor: ошибка на {self.command} {self.path}: {e!r}", file=sys.stderr)
+                try:
+                    self.send_json({"ok": False, "error": "внутренняя ошибка Ревизора, подробности в выводе open"}, 500)
+                except OSError:
+                    pass
+
+        def get(self):
             if seen:
                 seen.set()
             path = unquote(self.path.split("?")[0])
+            if "\x00" in path:
+                raise BadRequest(400, "в пути нулевой байт")
             if path == "/":
                 if kind(doc) != "html":
                     return self.send(200, text_shell(doc).encode("utf-8"), "text/html; charset=utf-8")
@@ -580,14 +670,17 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", se
                 self.send(200, f.read_bytes(), "font/woff2")
             elif path.startswith("/doc/"):
                 # Отчёт и всё, что лежит рядом с ним: картинки, стили, скрипты по относительным путям.
-                f = (doc.parent / path[5:]).resolve()
+                rel = path[5:]
+                if any(part.startswith(".") for part in Path(rel).parts):  # .git, .env и прочее скрытое не отдаётся
+                    return self.send(404, b"not found", "text/plain")
+                f = (doc.parent / rel).resolve()
                 if f == doc:
                     if kind(doc) != "html":  # текст открывается только через обёртку на /
                         self.send_response(302)
                         self.send_header("Location", "/")
                         return self.end_headers()
                     return self.send(200, inject(doc.read_text(encoding="utf-8")).encode("utf-8"), "text/html; charset=utf-8")
-                if doc.parent not in f.parents or not f.is_file() or f.name.endswith(".review.json"):
+                if doc.parent not in f.parents or not f.is_file() or is_sidecar(f.name):
                     return self.send(404, b"not found", "text/plain")
                 self.send(200, f.read_bytes(), mimetypes.guess_type(f.name)[0] or "application/octet-stream")
             elif path == "/api/source" and kind(doc) != "html":
@@ -604,13 +697,16 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", se
             else:
                 self.send(404, b"not found", "text/plain")
 
-        def do_POST(self):
+        def post(self):
             path = self.path.split("?")[0]
             if path == "/api/scan":
                 return self.request_scan(self.read_json())
             if path not in ("/api/review", "/api/done"):
                 return self.send(404, b"not found", "text/plain")
             body = self.read_json()
+            items = body.get("items", [])
+            if not isinstance(items, list) or not all(isinstance(i, dict) and isinstance(i.get("id"), str) for i in items):
+                raise BadRequest(400, "items – список правок, у каждой строковый id")
             with lock, locked(doc):
                 review = load(doc)
                 # Страница присылает только живые правки; применённые и отклонённые хранит файл.
@@ -619,7 +715,7 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", se
                 closed_ids = {i["id"] for i in closed}
                 # Правку, которую агент уже забрал в Live Edit, страница не меняет и не удаляет: он применяет её прямо сейчас.
                 taken = {i["id"]: i for i in review["items"] if i.get("state", "pending") == "pending" and i.get("taken")}
-                live = [taken.pop(i["id"], None) or dict(i, state="pending") for i in body.get("items", [])
+                live = [taken.pop(i["id"], None) or dict(i, state="pending") for i in items
                         if i.get("state", "pending") == "pending" and i.get("id") not in closed_ids]
                 review["items"] = closed + live + list(taken.values())
                 if "live" in body:
@@ -639,13 +735,12 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", se
 
         def request_scan(self, body):
             """Страница прислала свой текст: агент в цикле `wait` прочитает его и найдёт смысловые приметы нейрослопа."""
-            roots = [r for r in body.get("roots", []) if isinstance(r, dict) and isinstance(r.get("text"), str)]
+            roots = body.get("roots")
+            roots = [r for r in roots if isinstance(r, dict) and isinstance(r.get("text"), str)] if isinstance(roots, list) else []
             if not roots:
                 return self.send_json({"ok": False, "error": "нет текста"}, 400)
             TEXTS.mkdir(parents=True, exist_ok=True)
-            tmp = text_cache(doc).with_suffix(".tmp")
-            tmp.write_text(json.dumps({"doc": str(doc), "roots": roots}, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(text_cache(doc))
+            atomic_write(text_cache(doc), json.dumps({"doc": str(doc), "roots": roots}, ensure_ascii=False))
             with lock, locked(doc):
                 review = load(doc)
                 review["scan"] = {"state": "requested", "requested": now(), "sha": sha(doc.read_text(encoding="utf-8"))}
@@ -660,7 +755,7 @@ def remember_doc(doc: Path) -> None:
         CACHE.mkdir(parents=True, exist_ok=True)
         docs = json.loads(REGISTRY.read_text(encoding="utf-8")) if REGISTRY.is_file() else []
         if str(doc) not in docs:
-            REGISTRY.write_text(json.dumps(docs + [str(doc)], ensure_ascii=False, indent=1), encoding="utf-8")
+            atomic_write(REGISTRY, json.dumps(docs + [str(doc)], ensure_ascii=False, indent=1))
     except (OSError, ValueError):
         pass  # реестр – удобство для обучения, редактору он не нужен
 
@@ -735,7 +830,10 @@ def lang_skill(lang=None):
 
 
 def read_ledger(path: Path) -> dict:
-    ledger = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"seen": [], "stats": {}}
+    try:
+        ledger = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"seen": [], "stats": {}}
+    except ValueError as e:
+        sys.exit(f"журнал обучения {path} не читается ({e}). Почини его: без журнала разобранные пары придут снова.")
     # журналы до 0.8.0 хранили путь#id – перевести в хэши
     ledger["seen"] = [k if re.fullmatch(r"[0-9a-f]{16}", k) else sha(k) for k in ledger.get("seen", [])]
     return ledger
@@ -774,7 +872,7 @@ def cmd_pairs(args) -> int:
                 ledger["seen"] = sorted(set(ledger.get("seen", [])) | {e["key"]})
         for path in touched:
             ledgers[path]["updated"] = now()
-            Path(path).write_text(json.dumps(ledgers[path], ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+            atomic_write(Path(path), json.dumps(ledgers[path], ensure_ascii=False, indent=1) + "\n")
         BATCH.unlink()
         names = ", ".join(sorted({sk["name"] for l, sk in skills.items()
                                   if skill_files(sk, l)["ledger"] in touched})) or skill["name"]
@@ -796,7 +894,7 @@ def cmd_pairs(args) -> int:
     out = {"skill": skills[main_lang], "created": created, "files": files, "langs": langs,
            "playbook": str(ROOT / "skill" / "learn.md"), "stats": ledgers[files["ledger"]].get("stats", {}), **got}
     CACHE.mkdir(parents=True, exist_ok=True)
-    BATCH.write_text(json.dumps(got, ensure_ascii=False), encoding="utf-8")
+    atomic_write(BATCH, json.dumps(got, ensure_ascii=False))
     if args.count:
         print(len(got["pairs"]) + len(got["dismissed"]))
     else:
@@ -810,15 +908,20 @@ def cmd_open(args) -> int:
         sys.exit(f"нет файла: {doc}")
     if doc.suffix.lower() not in TEXT_SUFFIXES | HTML_SUFFIXES:
         sys.exit(f"поддерживаются {', '.join(sorted(TEXT_SUFFIXES | HTML_SUFFIXES))}: {doc.name}")
+    try:
+        doc.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        sys.exit(f"{doc.name} не в UTF-8. Пересохрани его в UTF-8 и открой снова.")
     remember_doc(doc)
-    review = load(doc)
-    reopen = review["status"] == "done"
-    if review["status"] == "done" and pending(review):
-        print(f"В {sidecar(doc).name} есть {len(pending(review))} неприменённых правок, они откроются в редакторе.",
-              file=sys.stderr)
-    if review["status"] != "open":
-        review["status"] = "open"
-        save(doc, review)
+    with locked(doc):
+        review = load(doc)
+        reopen = review["status"] == "done"
+        if review["status"] == "done" and pending(review):
+            print(f"В {sidecar(doc).name} есть {len(pending(review))} неприменённых правок, они откроются в редакторе.",
+                  file=sys.stderr)
+        if review["status"] != "open":
+            review["status"] = "open"
+            save(doc, review)
 
     update = check_update()
     if update:
@@ -1043,7 +1146,11 @@ def main(argv=None) -> int:
     p.add_argument("--force", action="store_true", help="с --check: спросить репо сейчас, мимо кэша")
     p.set_defaults(fn=cmd_update)
     args = ap.parse_args(argv)
-    return args.fn(args)
+    try:
+        return args.fn(args)
+    except ReviewError as e:
+        print(f"revizor: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
