@@ -1,0 +1,7 @@
+/* Страница текстового документа: #revizor-root – текст байт в байт (вид «Текст»). */
+:root { --bg: #f6f5f1; --ink: #1d1c1a; --muted: #5f5c56; --rule: #dcd8ce; --tint: rgba(29, 28, 26, .055); --link: #2457c5; }
+@media (prefers-color-scheme: dark) { :root { --bg: #161614; --ink: #ecebe6; --muted: #a8a59d; --rule: #3a3833; --tint: rgba(236, 235, 230, .07); --link: #8db0ff; } }
+html, body { margin: 0; background: var(--bg); color: var(--ink); }
+::selection { background: color-mix(in srgb, var(--link) 26%, transparent); }
+#revizor-root { max-width: 72ch; margin: 0 auto; padding: 40px 24px 120px; white-space: pre-wrap; word-wrap: break-word;
+  font: 16px/1.65 Charter, Georgia, serif; }

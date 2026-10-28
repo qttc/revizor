@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/qttc/revizor/blob/main/docs/review.schema.json",
+  "title": "Revizor review file (*.review.json), format version 1",
+  "description": "Правки владельца к документу. Поля, которых нет в схеме, допустимы: читатель их пропускает. Обязательные поля и значения enum в пределах версии 1 не меняются.",
+  "type": "object",
+  "required": ["version", "doc", "status", "items"],
+  "properties": {
+    "version": {"const": 1},
+    "doc": {"type": "string", "description": "имя документа в той же папке"},
+    "doc_sha": {"type": ["string", "null"]},
+    "register": {"enum": ["report", "deck", "slack", "spec", "doc", "email", "client", "other", null]},
+    "register_auto": {"type": "boolean"},
+    "status": {"enum": ["open", "done", "stopped"], "description": "open – редактор открыт, done – «Завершить ревью», stopped – сервер остановили"},
+    "created": {"type": "string"},
+    "updated": {"type": ["string", "null"]},
+    "live": {"type": "boolean"},
+    "view": {"enum": ["md", "plain"]},
+    "items": {"type": "array", "items": {"$ref": "#/$defs/item"}},
+    "dismissed": {
+      "type": "array",
+      "items": {"type": "object", "properties": {"rule": {"type": "string"}, "quote": {"type": "string"}, "prefix": {"type": "string"}}}
+    },
+    "scan": {
+      "type": "object",
+      "properties": {"state": {"enum": ["requested", "taken", "done"]}, "requested": {"type": "string"}, "taken": {"type": "string"}, "done": {"type": "string"}, "sha": {"type": "string"}}
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "quote"],
+        "properties": {
+          "id": {"type": "string"}, "quote": {"type": "string"}, "start": {"type": "integer"}, "end": {"type": "integer"},
+          "prefix": {"type": "string"}, "suffix": {"type": "string"}, "rule": {"type": "string"}, "title": {"type": "string"},
+          "why": {"type": "string"}, "rewrite": {"type": ["string", "null"]}, "frame": {"type": "string"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "item": {
+      "type": "object",
+      "required": ["id", "kind"],
+      "properties": {
+        "id": {"type": "string"},
+        "kind": {"enum": ["edit", "comment"]},
+        "scope": {"enum": ["text", "block", "doc"]},
+        "state": {"enum": ["pending", "applied", "rejected"], "description": "нет поля – pending"},
+        "start": {"type": "integer"}, "end": {"type": "integer"},
+        "quote": {"type": "string"}, "prefix": {"type": "string"}, "suffix": {"type": "string"},
+        "replacement": {"type": "string"}, "comment": {"type": "string"}, "why": {"type": "string"}, "note": {"type": "string"},
+        "where": {"type": "string"}, "frame": {"type": "string"}, "selector": {"type": "string"}, "snippet": {"type": "string"},
+        "text": {"type": "string"}, "lines": {"type": "array", "items": {"type": "integer"}},
+        "orphan": {"type": "boolean"}, "rule": {"type": "string"}, "source": {"type": "string"},
+        "sent": {"type": "string"}, "taken": {"type": "string"}, "created": {"type": "string"}, "resolved": {"type": "string"}
+      }
+    }
+  }
+}

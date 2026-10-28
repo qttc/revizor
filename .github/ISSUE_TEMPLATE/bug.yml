@@ -1,0 +1,30 @@
+name: Bug
+description: Something does not work as described
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Steps to reproduce, what you expected, what you saw. Use a made-up document, not a work one.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Revizor version
+      description: Output of `python3 revizor.py --version`
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS, browser, Python
+      placeholder: macOS 26.1, Chrome 141, Python 3.12
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Output of `open` or the failing command
+      render: text

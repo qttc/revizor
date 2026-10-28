@@ -1,3 +1,4 @@
+import http.client
 import io
 import json
 import os
@@ -10,12 +11,14 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import revizor  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 def post(url, data):
@@ -46,6 +49,41 @@ class ServerTest(unittest.TestCase):
         data = json.loads(urllib.request.urlopen(self.base + "/api/state").read())
         self.assertEqual(data["doc"]["type"], "md")
         self.assertEqual(data["review"]["items"], [])
+
+    def test_state_carries_ui_lang_from_config_and_env(self):
+        saved = (revizor.CONFIG, os.environ.pop("REVIZOR_UI_LANG", None))
+        def restore():
+            revizor.CONFIG = saved[0]
+            os.environ.pop("REVIZOR_UI_LANG", None)
+            if saved[1] is not None:
+                os.environ["REVIZOR_UI_LANG"] = saved[1]
+        self.addCleanup(restore)
+        revizor.CONFIG = Path(self.tmp.name) / "config.json"
+
+        def state():  # язык читается при старте сервера – на каждый случай свой сервер
+            server = ThreadingHTTPServer(("127.0.0.1", 0), revizor.make_handler(self.doc, threading.Event()))
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/api/state").read())
+            finally:
+                server.shutdown()
+                server.server_close()
+        self.assertIsNone(state()["ui_lang"])  # не задан – страница выберет по языку браузера
+        revizor.CONFIG.write_text(json.dumps({"ui_lang": "en"}), encoding="utf-8")
+        self.assertEqual(state()["ui_lang"], "en")
+        os.environ["REVIZOR_UI_LANG"] = "ru"  # переменная окружения главнее настройки
+        self.assertEqual(state()["ui_lang"], "ru")
+        os.environ["REVIZOR_UI_LANG"] = "de"  # неизвестный язык не передаётся
+        revizor.CONFIG.write_text(json.dumps({"ui_lang": "fr"}), encoding="utf-8")
+        self.assertIsNone(state()["ui_lang"])
+
+    def test_overlay_has_english_dictionary(self):
+        js = urllib.request.urlopen(self.base + "/_revizor/overlay.js").read().decode()
+        for s in ("const EN = {", '"Отправить агенту": "Send to agent"', '"Нейрослоп": "AI slop"', "state.ui_lang", "title_en", "why_en"):
+            self.assertIn(s, js)
+        # строка, которую разбирает агент, остаётся русской в любом языке панели
+        self.assertIn('it.comment = "Переписать без нейрослопа: "', js)
+        self.assertNotIn("—", js[js.index("const EN = {"):js.index("const tr = ")])  # в английских строках нет em dash
 
     def test_text_shell_keeps_text_and_loads_overlay(self):
         page = urllib.request.urlopen(self.base + "/").read().decode()
@@ -124,6 +162,167 @@ class ServerTest(unittest.TestCase):
         post(self.base + "/api/review", {"items": [self.edit("new")]})
         ids = {i["id"]: i["state"] for i in revizor.load(self.doc)["items"]}
         self.assertEqual(ids, {"old": "applied", "new": "pending"})
+
+
+class HardeningTest(ServerTest.__base__):
+    """Сервер на 127.0.0.1 доступен любой вкладке браузера: чужие сайты, DNS-rebinding, кривые запросы."""
+
+    setUp, tearDown, edit = ServerTest.setUp, ServerTest.tearDown, ServerTest.edit
+
+    def raw(self, method, path, body=b"", headers=None):
+        c = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=5)
+        c.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        h = {"Host": f"127.0.0.1:{self.server.server_address[1]}", "Content-Length": str(len(body))}
+        h.update(headers or {})
+        for k, v in h.items():
+            if v is not None:
+                c.putheader(k, v)
+        c.endheaders(body)
+        r = c.getresponse()
+        out = (r.status, r.read())
+        c.close()
+        return out
+
+    def json_post(self, path, body, **headers):
+        return self.raw("POST", path, json.dumps(body).encode(), dict({"Content-Type": "application/json"}, **headers))[0]
+
+    def test_foreign_host_is_refused(self):
+        self.assertEqual(self.raw("GET", "/api/state", headers={"Host": "evil.example"})[0], 403)
+        self.assertEqual(self.raw("GET", "/api/state", headers={"Host": f"localhost:{self.server.server_address[1]}"})[0], 200)
+
+    def test_cross_site_post_is_refused(self):
+        post(self.base + "/api/review", {"items": [self.edit()]})
+        self.assertEqual(self.raw("POST", "/api/review", b'{"items": []}', {"Content-Type": "text/plain"})[0], 403)
+        self.assertEqual(self.json_post("/api/review", {"items": []}, Origin="https://evil.example"), 403)
+        self.assertEqual(self.json_post("/api/done", {"items": []}, **{"Sec-Fetch-Site": "cross-site"}), 403)
+        self.assertEqual(len(revizor.load(self.doc)["items"]), 1)
+        self.assertFalse(self.done.is_set())
+        self.assertEqual(self.json_post("/api/review", {"items": []}, Origin=self.base, **{"Sec-Fetch-Site": "same-origin"}), 200)
+
+    def test_hidden_files_and_sidecars_are_closed(self):
+        d = Path(self.tmp.name)
+        (d / "sub" / ".git").mkdir(parents=True)
+        (d / "sub" / ".git" / "config").write_text("secret", encoding="utf-8")
+        (d / ".env").write_text("TOKEN=1", encoding="utf-8")
+        (d / "other.review.json").write_text("{}", encoding="utf-8")
+        (d / "img.png").write_bytes(b"png")
+        for path in ("/doc/sub/.git/config", "/doc/.env", "/doc/OTHER.REVIEW.JSON", "/doc/other.review.json.tmp"):
+            self.assertEqual(self.raw("GET", path)[0], 404, path)
+        self.assertEqual(self.raw("GET", "/doc/img.png"), (200, b"png"))
+        self.assertEqual(self.raw("GET", "/doc/%00")[0], 400)
+        os.symlink(d / "sub" / ".git", d / "git-link")  # симлинк внутри папки на скрытую папку
+        self.assertEqual(self.raw("GET", "/doc/git-link/config")[0], 404)
+
+    def test_hidden_html_doc_itself_opens(self):
+        d = Path(self.tmp.name)
+        hidden = d / ".draft.html"
+        hidden.write_text("<p>черновик</p>", encoding="utf-8")
+        server = ThreadingHTTPServer(("127.0.0.1", 0), revizor.make_handler(hidden, threading.Event()))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        page = urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/").read().decode()
+        self.assertIn("черновик", page)
+
+    def test_bad_bodies_get_errors_and_server_survives(self):
+        for body in (b"[]", b"{bad", json.dumps({"items": [1]}).encode(), json.dumps({"items": [{"kind": "edit"}]}).encode()):
+            self.assertEqual(self.raw("POST", "/api/review", body, {"Content-Type": "application/json"})[0], 400, body)
+        self.assertEqual(self.raw("POST", "/api/review", b"", {"Content-Type": "application/json", "Content-Length": "-1"})[0], 400)
+        self.assertEqual(self.raw("POST", "/api/scan", b"x" * 10,
+                                  {"Content-Type": "application/json", "Content-Length": str(revizor.MAX_BODY + 1)})[0], 413)
+        self.assertEqual(self.raw("GET", "/api/state")[0], 200)
+
+    def test_broken_sidecar_is_reported_and_kept(self):
+        revizor.sidecar(self.doc).write_text("{не json", encoding="utf-8")
+        status, body = self.raw("GET", "/api/state")
+        self.assertEqual(status, 500)
+        self.assertIn("не читается", json.loads(body)["error"])
+        self.assertEqual(self.json_post("/api/review", {"items": []}), 500)
+        self.assertEqual(revizor.sidecar(self.doc).read_text(encoding="utf-8"), "{не json")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(revizor.main(["show", str(self.doc)]), 2)
+        self.assertIn("не читается", err.getvalue())
+
+
+class SchemaTest(ServerTest.__base__):
+    """Файл правок, который пишет Ревизор, проходит docs/review.schema.json – это контракт формата v1."""
+
+    setUp, tearDown, edit = ServerTest.setUp, ServerTest.tearDown, ServerTest.edit
+
+    def test_written_file_matches_schema(self):
+        from schema_check import errors
+        saved = revizor.TEXTS
+        self.addCleanup(setattr, revizor, "TEXTS", saved)
+        revizor.TEXTS = Path(self.tmp.name) / "texts"
+        post(self.base + "/api/review", {"register": "report", "live": True, "view": "md",
+                                         "items": [dict(self.edit("a"), sent="t"), {"id": "b", "kind": "comment", "scope": "doc",
+                                                                                    "comment": "короче", "state": "pending"}],
+                                         "dismissed": [{"rule": "ne-pro", "quote": "не про", "prefix": "это "}]})
+        post(self.base + "/api/scan", {"roots": [{"key": "", "text": "Конверсия выросла на фоне нового онбординга."}]})
+        f = Path(self.tmp.name) / "f.json"
+        f.write_text(json.dumps([{"quote": "Конверсия выросла", "rewrite": None, "rule": "x"}]), encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            revizor.main(["suggest", str(self.doc), str(f)])
+            revizor.main(["mark", str(self.doc), "a", "--state", "applied"])
+        post(self.base + "/api/done", {"items": [{"id": "b", "kind": "comment", "scope": "doc", "comment": "короче"}]})
+        review = revizor.load(self.doc)
+        self.assertEqual(errors(review), [])
+        self.assertEqual(errors(dict(review, status="closed", items=[{"id": 1}])),
+                         ["$.status: 'closed' не из ['open', 'done', 'stopped']", "$.items[0]: нет поля kind",
+                          "$.items[0].id: int вместо string"])
+
+
+class SidecarTest(unittest.TestCase):
+    """report.md и его экспорт report.html в одной папке – правки не смешиваются."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_single_doc_keeps_short_name(self):
+        (self.d / "report.md").write_text("x", encoding="utf-8")
+        self.assertEqual(revizor.sidecar(self.d / "report.md").name, "report.review.json")
+
+    def test_twins_get_own_files(self):
+        md, html = self.d / "report.md", self.d / "report.html"
+        md.write_text("x", encoding="utf-8")
+        html.write_text("<p>x</p>", encoding="utf-8")
+        self.assertEqual(revizor.sidecar(md).name, "report.md.review.json")
+        self.assertEqual(revizor.sidecar(html).name, "report.html.review.json")
+
+    def test_owner_case_does_not_split_history(self):
+        md = self.d / "report.md"
+        md.write_text("x", encoding="utf-8")
+        (self.d / "report.html").write_text("<p>x</p>", encoding="utf-8")
+        (self.d / "report.review.json").write_text(json.dumps({"version": 1, "doc": "Report.md", "status": "open", "items": []}),
+                                                   encoding="utf-8")
+        self.assertEqual(revizor.sidecar(md).name, "report.review.json")
+
+    def test_atomic_write_leaves_no_temp_and_survives_parallel_writers(self):
+        f = self.d / "ports.json"
+        ths = [threading.Thread(target=revizor.atomic_write, args=(f, json.dumps({"n": n}))) for n in range(20)]
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join()
+        self.assertIn(json.loads(f.read_text(encoding="utf-8"))["n"], range(20))
+        self.assertEqual(sorted(p.name for p in self.d.iterdir()), ["ports.json"])
+
+    def test_old_short_file_stays_with_its_doc(self):
+        md, html = self.d / "report.md", self.d / "report.html"
+        md.write_text("x", encoding="utf-8")
+        r = revizor.load(md)
+        r["items"] = [{"id": "a", "quote": "x", "state": "pending"}]
+        revizor.save(md, r)  # ревью до появления экспорта – короткое имя
+        html.write_text("<p>x</p>", encoding="utf-8")
+        self.assertEqual(revizor.sidecar(md).name, "report.review.json")
+        self.assertEqual(revizor.sidecar(html).name, "report.html.review.json")
+        self.assertEqual(revizor.load(html)["items"], [])
+        self.assertEqual(len(revizor.load(md)["items"]), 1)
 
 
 class HtmlServerTest(unittest.TestCase):
@@ -395,6 +594,11 @@ class StyleSkillTest(unittest.TestCase):
         for r in revizor.load_rules()["rules"]:
             self.assertTrue(r["id"] and r["title"] and r["pattern"] and r["why"], r)
 
+    def test_base_rules_have_english_title_and_why(self):
+        for r in json.loads((revizor.RULES_DIR / "ru.json").read_text(encoding="utf-8"))["rules"]:
+            self.assertTrue(r.get("title_en") and r.get("why_en"), r["id"])
+            self.assertNotIn("—", r["title_en"] + r["why_en"], r["id"])
+
 
 class RadarServerTest(ServerTest.__base__):
     setUp, tearDown, edit = ServerTest.setUp, ServerTest.tearDown, ServerTest.edit
@@ -586,6 +790,26 @@ class LearnTest(unittest.TestCase):
         self.cli("pairs", "--ack")
         self.assertNotIn("/", ledger.read_text(encoding="utf-8").split('"seen"')[1].split("]")[0])
 
+    def test_count_does_not_replace_batch(self):
+        self.cli("pairs")
+        r = revizor.load(self.doc)
+        r["items"].append({"id": "g", "kind": "edit", "scope": "text", "quote": "старое", "replacement": "новое", "state": "applied"})
+        revizor.save(self.doc, r)
+        self.assertEqual(self.cli("pairs", "--count").strip(), "3")
+        self.cli("pairs", "--ack")  # отмечается порция, которую агент видел, без новой правки
+        self.assertEqual([p["before"] for p in json.loads(self.cli("pairs"))["pairs"]], ["старое"])
+
+    def test_spotlight_only_on_discover(self):
+        calls = []
+        revizor.shutil.which = lambda name: "/usr/bin/mdfind"
+        run = revizor.subprocess.run
+        self.addCleanup(setattr, revizor.subprocess, "run", run)
+        revizor.subprocess.run = lambda cmd, **kw: calls.append(cmd) or type("R", (), {"stdout": ""})()
+        revizor.known_sidecars()
+        self.assertEqual(calls, [])
+        revizor.known_sidecars(discover=True)
+        self.assertEqual(calls[0][0], "mdfind")
+
     def test_batch_is_capped(self):
         out = json.loads(self.cli("pairs", "--max", "2"))
         self.assertEqual(len(out["pairs"]) + len(out["dismissed"]) + len(out["confirmed"]), 2)
@@ -675,9 +899,64 @@ class UpdateTest(unittest.TestCase):
         self.assertIsNone(revizor.check_update())
         self.assertEqual(self.calls, 0)
 
+    def test_update_moves_to_latest_tag_not_branch_head(self):
+        if not revizor.shutil.which("git"):
+            self.skipTest("нет git")
+        t = Path(self.tmp.name)
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        git = lambda cwd, *a: revizor.subprocess.run(["git", "-C", str(cwd), *a], check=True, capture_output=True, env=env, text=True).stdout.strip()
+        origin = t / "origin"
+        origin.mkdir()
+        git(origin, "init", "-q", "-b", "main")
+        (origin / "install.sh").write_text("true\n", encoding="utf-8")
+        for v, tag in (("0.0.1", True), ("0.0.2", True), ("0.0.3", False)):
+            (origin / "revizor.py").write_text(f'__version__ = "{v}"\n', encoding="utf-8")
+            (origin / "CHANGELOG.md").write_text(f"## [{v}] – 2026-01-01\n", encoding="utf-8")
+            git(origin, "add", "-A")
+            git(origin, "commit", "-q", "-m", v)
+            if tag:
+                git(origin, "tag", f"v{v}")
+        clone = t / "clone"
+        revizor.subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+        git(clone, "reset", "-q", "--hard", "v0.0.1")
+        saved = (revizor.ROOT, revizor.__version__)
+        self.addCleanup(lambda: (setattr(revizor, "ROOT", saved[0]), setattr(revizor, "__version__", saved[1])))
+        revizor.ROOT, revizor.__version__ = clone, "0.0.1"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            revizor.main(["update"])
+        self.assertIn("0.0.1 → 0.0.2", out.getvalue())
+        self.assertEqual(git(clone, "rev-parse", "HEAD"), git(origin, "rev-parse", "v0.0.2^{commit}"))
+
     def test_parse_version(self):
         self.assertEqual(revizor.parse_version("v0.3.1"), (0, 3, 1))
         self.assertIsNone(revizor.parse_version("latest"))
+
+
+class BrowserTest(unittest.TestCase):
+    def setUp(self):
+        self.saved = (revizor.sys.platform, revizor.subprocess.run, revizor.webbrowser.open)
+        self.calls = []
+        revizor.webbrowser.open = lambda url: self.calls.append(("default", url)) or True
+
+    def tearDown(self):
+        revizor.sys.platform, revizor.subprocess.run, revizor.webbrowser.open = self.saved
+
+    def test_linux_uses_default_browser(self):
+        revizor.sys.platform = "linux"
+        revizor.subprocess.run = lambda *a, **kw: self.fail("на Linux open -a не вызывается")
+        revizor.open_browser("http://127.0.0.1:1/")
+        self.assertEqual(self.calls, [("default", "http://127.0.0.1:1/")])
+
+    def test_mac_without_chrome_falls_back(self):
+        revizor.sys.platform = "darwin"
+        revizor.subprocess.run = lambda cmd, **kw: type("R", (), {"returncode": 1})()
+        revizor.open_browser("http://127.0.0.1:1/")
+        self.assertEqual(len(self.calls), 1)
+
+    def test_missing_doc_exits(self):
+        with self.assertRaises(SystemExit):
+            revizor.main(["wait", "/нет/такого.md"])
 
 
 class ReleaseHygieneTest(unittest.TestCase):
@@ -707,14 +986,14 @@ class ReopenTest(unittest.TestCase):
         t = Path(self.tmp.name).resolve()
         self.doc = t / "report.md"
         self.doc.write_text("# Итоги\n", encoding="utf-8")
-        self.saved = (revizor.CACHE, revizor.REGISTRY, revizor.REOPEN_WAIT, revizor.check_update, revizor.subprocess.run)
+        self.saved = (revizor.CACHE, revizor.REGISTRY, revizor.REOPEN_WAIT, revizor.check_update, revizor.open_browser)
         revizor.CACHE, revizor.REGISTRY, revizor.REOPEN_WAIT = t / "cache", t / "cache" / "docs.json", 1
         revizor.check_update = lambda: None
         self.opened = []
-        revizor.subprocess.run = lambda cmd, **kw: self.opened.append(cmd)
+        revizor.open_browser = self.opened.append
 
     def tearDown(self):
-        revizor.CACHE, revizor.REGISTRY, revizor.REOPEN_WAIT, revizor.check_update, revizor.subprocess.run = self.saved
+        revizor.CACHE, revizor.REGISTRY, revizor.REOPEN_WAIT, revizor.check_update, revizor.open_browser = self.saved
         self.tmp.cleanup()
 
     def run_open(self, tab=False):

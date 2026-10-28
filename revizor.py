@@ -18,7 +18,6 @@
 import argparse
 import shutil
 import contextlib
-import fcntl
 import hashlib
 import html
 import json
@@ -27,15 +26,22 @@ import os
 import re
 import socket
 import subprocess
+import tempfile
 import sys
 import threading
 import time
+import webbrowser
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote
 
-__version__ = "0.9.0"
+try:
+    import fcntl
+except ImportError:  # Windows: блокировки файла правок на fcntl, без них два процесса потеряют правки
+    fcntl = None
+
+__version__ = "1.0.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -61,7 +67,65 @@ def now():
 
 
 def sidecar(doc: Path) -> Path:
-    return doc.with_name(doc.stem + ".review.json")
+    """Файл правок рядом с документом: report.md → report.review.json. Рядом есть документ с тем же именем и другим
+    расширением (report.md и его экспорт report.html) – у каждого свой: report.md.review.json. Файл до 1.0, который уже
+    принадлежит этому документу, остаётся на месте."""
+    short, full = doc.with_name(doc.stem + ".review.json"), doc.with_name(doc.name + ".review.json")
+    if full.exists():
+        return full
+    if short.exists():
+        owner = _owner(short)
+        # регистр не сверяем: на macOS Report.md и report.md – один файл, а resolve() оставляет регистр из команды
+        return short if owner is None or owner.casefold() == doc.name.casefold() else full
+    twins = [doc.with_suffix(x) for x in TEXT_SUFFIXES | HTML_SUFFIXES if x != doc.suffix.lower()]
+    return full if any(t.exists() for t in twins) else short
+
+
+_OWNERS = {}  # файл правок → (mtime, doc): sidecar() зовут на каждый опрос вкладки, разбирать JSON каждый раз незачем
+
+
+def _owner(short: Path):
+    try:
+        mtime = short.stat().st_mtime_ns
+        cached = _OWNERS.get(short)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        owner = json.loads(short.read_text(encoding="utf-8")).get("doc")
+    except (OSError, ValueError, AttributeError):
+        return None
+    owner = owner if isinstance(owner, str) else None
+    _OWNERS[short] = (mtime, owner)
+    return owner
+
+
+def is_sidecar(name: str) -> bool:
+    n = name.lower()  # файловая система macOS регистр не различает: REPORT.REVIEW.JSON – тот же файл правок
+    return n.endswith(".review.json") or n.endswith(".review.json.tmp")
+
+
+class BadRequest(Exception):
+    def __init__(self, code: int, msg: str):
+        super().__init__(msg)
+        self.code, self.msg = code, msg
+
+
+class ReviewError(Exception):
+    """Файл правок не читается. Перезаписывать его нельзя: это история правок владельца."""
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Через временный файл со своим именем: два процесса пишут ports.json одновременно и не мешают друг другу.
+    Имя начинается с точки – скрытый файл сервер не отдаёт."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def sha(text: str) -> str:
@@ -100,40 +164,6 @@ def inject(page: str) -> str:
     return page[:m[-1].start()] + OVERLAY_TAG + page[m[-1].start():] if m else page + OVERLAY_TAG
 
 
-MD_CSS = """
-#revizor-md { max-width: 72ch; margin: 0 auto; padding: 76px 28px 140px; font: 17px/1.65 Charter, "Iowan Old Style", Georgia, serif; }
-#revizor-md > :first-child { margin-top: 0; }
-#revizor-md h1, #revizor-md h2, #revizor-md h3, #revizor-md h4, #revizor-md h5, #revizor-md h6 {
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif; line-height: 1.25; margin: 1.7em 0 .5em; text-wrap: balance; }
-#revizor-md h1 { font-size: 32px; font-weight: 750; letter-spacing: -.015em; }
-#revizor-md h2 { font-size: 24px; font-weight: 700; letter-spacing: -.01em; }
-#revizor-md h3 { font-size: 19px; font-weight: 650; }
-#revizor-md h4, #revizor-md h5, #revizor-md h6 { font-size: 16px; font-weight: 650; }
-#revizor-md p { margin: .8em 0; }
-#revizor-md a { color: var(--link); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
-#revizor-md strong { font-weight: 700; }
-#revizor-md del { color: var(--muted); }
-#revizor-md code { font: .86em/1.4 ui-monospace, "SF Mono", Menlo, monospace; background: var(--tint); padding: .12em .38em; border-radius: 6px; }
-#revizor-md pre { background: var(--tint); border-radius: 14px; padding: 14px 18px; overflow-x: auto; margin: 1.1em 0; }
-#revizor-md pre code { background: none; padding: 0; font-size: 13.5px; line-height: 1.6; }
-#revizor-md blockquote { margin: 1em 0; padding: 0 0 0 18px; border-left: 2px solid var(--rule); color: var(--muted); }
-#revizor-md ul, #revizor-md ol { padding-left: 1.4em; margin: .7em 0; }
-#revizor-md li { margin: .12em 0; }
-#revizor-md li > ul, #revizor-md li > ol { margin: .15em 0; }
-#revizor-md li > p { margin: .3em 0; }
-#revizor-md li.task { list-style: none; margin-left: -1.3em; }
-#revizor-md li.task input { margin: 0 .55em 0 0; vertical-align: -.1em; accent-color: var(--link); }
-#revizor-md .table { overflow-x: auto; margin: 1.2em 0; }
-#revizor-md table { border-collapse: collapse; font: 14.5px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; min-width: 60%; }
-#revizor-md th, #revizor-md td { padding: 8px 14px 8px 0; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
-#revizor-md th { font-weight: 650; border-bottom-color: var(--ink); }
-#revizor-md hr { border: 0; height: 1px; background: var(--rule); margin: 2.2em 0; }
-#revizor-md img { max-width: 100%; border-radius: 10px; }
-#revizor-md .raw { color: var(--muted); font: 13.5px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; }
-#revizor-md .fn { font-size: 14.5px; color: var(--muted); }
-html[data-revizor-view="md"] #revizor-root, html[data-revizor-view="plain"] #revizor-md { display: none; }
-html[data-revizor-mode="md"] #revizor-root { padding-top: 76px; }
-"""
 
 
 def text_shell(doc: Path) -> str:
@@ -141,26 +171,26 @@ def text_shell(doc: Path) -> str:
     его заполняет слой правок (вид «Оформление»); <base> нужен, чтобы картинки по относительным путям шли из папки документа."""
     body = html.escape(doc.read_text(encoding="utf-8"), quote=False)
     md = kind(doc) == "md"
+    css = (WEB / "shell.css").read_text(encoding="utf-8") + ((WEB / "markdown.css").read_text(encoding="utf-8") if md else "")
     return f"""<!doctype html>
-<html lang="ru" data-revizor-mode="{"md" if md else "text"}"{' data-revizor-view="md"' if md else ""}><head><meta charset="utf-8">
+<html lang="{doc_lang(doc)}" data-revizor-mode="{"md" if md else "text"}"{' data-revizor-view="md"' if md else ""}><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>{html.escape(doc.name)} · Revizor</title>
 {'<base href="/doc/">' if md else ""}
 <style>
-:root {{ --bg: #f6f5f1; --ink: #1d1c1a; --muted: #5f5c56; --rule: #dcd8ce; --tint: rgba(29, 28, 26, .055); --link: #2457c5; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --bg: #161614; --ink: #ecebe6; --muted: #a8a59d; --rule: #3a3833; --tint: rgba(236, 235, 230, .07); --link: #8db0ff; }} }}
-html, body {{ margin: 0; background: var(--bg); color: var(--ink); }}
-::selection {{ background: color-mix(in srgb, var(--link) 26%, transparent); }}
-#revizor-root {{ max-width: 72ch; margin: 0 auto; padding: 40px 24px 120px; white-space: pre-wrap; word-wrap: break-word;
-  font: 16px/1.65 Charter, Georgia, serif; }}
-{MD_CSS if md else ""}
-</style></head><body><main id="revizor-root">{body}</main>{'<article id="revizor-md"></article>' if md else ""}{OVERLAY_TAG}</body></html>
+{css}</style></head><body><main id="revizor-root">{body}</main>{'<article id="revizor-md"></article>' if md else ""}{OVERLAY_TAG}</body></html>
 """
 
 
 def load(doc: Path) -> dict:
     p = sidecar(doc)
     if p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
+        try:
+            review = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise ReviewError(f"файл правок {p} не читается ({e}). Почини его или переименуй, тогда начнётся новый.") from e
+        if not isinstance(review, dict) or not isinstance(review.get("items"), list):
+            raise ReviewError(f"файл правок {p} – не формат Ревизора: нет списка items. Переименуй его, тогда начнётся новый.")
+        return review
     return {
         "version": FORMAT_VERSION,
         "doc": doc.name,
@@ -175,21 +205,19 @@ def load(doc: Path) -> dict:
 
 def save(doc: Path, review: dict) -> None:
     review["updated"] = now()
-    p = sidecar(doc)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(review, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(p)
+    atomic_write(sidecar(doc), json.dumps(review, ensure_ascii=False, indent=2) + "\n")
 
 
 def pending(review: dict) -> list:
     return [i for i in review["items"] if i.get("state", "pending") == "pending"]
 
 
-LOCKS = Path.home() / ".cache" / "revizor" / "locks"
-TEXTS = Path.home() / ".cache" / "revizor" / "text"  # текст страницы для смысловой проверки: у бандла и HTML его видит только страница
+LOCKS = CACHE / "locks"
+TEXTS = CACHE / "text"  # текст страницы для смысловой проверки: у бандла и HTML его видит только страница
 REOPEN_WAIT = 4  # с: вкладка опрашивает сервер раз в 1,5 с
 WAIT_GRACE = 10  # с: столько wait ждёт, что завершённое ревью откроют снова
 CTX = 32
+MAX_BODY = 10 * 1024 * 1024  # байт: больше страница не шлёт даже с текстом большого дека
 
 
 def text_cache(doc: Path) -> Path:
@@ -316,8 +344,7 @@ def check_update(force: bool = False):
         latest = latest_release()
         if latest:
             try:
-                UPDATE_CACHE.parent.mkdir(parents=True, exist_ok=True)
-                UPDATE_CACHE.write_text(json.dumps({"checked": time.time(), "latest": latest}), encoding="utf-8")
+                atomic_write(UPDATE_CACHE, json.dumps({"checked": time.time(), "latest": latest}))
             except OSError:
                 pass
     if latest and parse_version(latest) > parse_version(__version__):
@@ -349,10 +376,22 @@ def cmd_update(args) -> int:
     if dirty:
         sys.exit("Обновление остановлено: в папке Ревизора есть свои изменения – " + ", ".join(dirty))
     old = __version__
-    pull = git("pull", "--ff-only")
-    if pull.returncode != 0:
-        sys.exit("git pull не прошёл:\n" + (pull.stderr or pull.stdout).strip())
-    subprocess.run([str(ROOT / "install.sh")], check=False)
+    # ставится последний релиз: тег vX.Y.Z. Ветка между релизами может уйти вперёд невыпущенным кодом
+    fetch = git("fetch", "--tags", "--quiet", "origin")
+    if fetch.returncode != 0:
+        sys.exit("git fetch не прошёл:\n" + (fetch.stderr or fetch.stdout).strip())
+    tags = [t for t in git("tag", "--list", "v*").stdout.split() if parse_version(t)]
+    if not tags:
+        sys.exit("В репо нет релизных тегов vX.Y.Z.")
+    tag = max(tags, key=parse_version)
+    if parse_version(tag) <= parse_version(old):
+        print(f"Уже последняя версия: {old}.")
+        return 0
+    move = git("merge", "--ff-only", "--quiet", tag)
+    if move.returncode != 0:
+        sys.exit(f"Не получилось перейти на {tag}: в папке Ревизора свои коммиты или не та ветка.\n"
+                 + (move.stderr or move.stdout).strip())
+    subprocess.run(["bash", str(ROOT / "install.sh")], check=False)
     new = re.search(r'__version__ = "([^"]+)"', (ROOT / "revizor.py").read_text(encoding="utf-8")).group(1)
     if new == old:
         print(f"Уже последняя версия: {old}.")
@@ -402,6 +441,12 @@ def config() -> dict:
         return json.loads(CONFIG.read_text(encoding="utf-8")) if CONFIG.is_file() else {}
     except (OSError, ValueError):
         return {}
+
+
+def ui_lang():
+    """Язык панели: REVIZOR_UI_LANG главнее ui_lang из настроек. Не задан – None, страница выберет по языку браузера."""
+    v = str(os.environ.get("REVIZOR_UI_LANG") or config().get("ui_lang") or "").strip().lower()
+    return v if v in ("ru", "en") else None
 
 
 def find_style_skill(min_score: int = 30, lang=None):
@@ -504,13 +549,13 @@ def cmd_style(args) -> int:
     return 0
 
 
-def free_port() -> int:
+def pick_free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
-def port_free(port: int) -> bool:
+def is_port_free(port: int) -> bool:
     with socket.socket() as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # как у HTTPServer: TIME_WAIT от прошлого сервера не мешает
         try:
@@ -532,14 +577,28 @@ def last_port(doc: Path, port=None):
         return ports.get(key)
     ports[key] = port
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(ports), encoding="utf-8")
+    atomic_write(f, json.dumps(ports))
 
 
-def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", seen=None):
+def merge_items(review: dict, items: list) -> list:
+    """Правки со страницы → файл. Страница присылает только живые правки; применённые и отклонённые хранит файл.
+    Агент мог закрыть правку, пока вкладка открыта: такую страница больше не воскрешает. Правку, которую агент уже
+    забрал в Live Edit, страница не меняет и не удаляет: он применяет её прямо сейчас. Возвращает закрытые правки."""
+    closed = [i for i in review["items"] if i.get("state", "pending") != "pending"]
+    closed_ids = {i["id"] for i in closed}
+    taken = {i["id"]: i for i in review["items"] if i.get("state", "pending") == "pending" and i.get("taken")}
+    live = [taken.pop(i["id"], None) or dict(i, state="pending") for i in items
+            if i.get("state", "pending") == "pending" and i.get("id") not in closed_ids]
+    review["items"] = closed + live + list(taken.values())
+    return closed
+
+
+def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", tab_seen=None):
     doc = doc.resolve()
     lock = threading.Lock()
     if skill == "auto":
         skill = find_style_skill(lang=doc_lang(doc))
+    lang = ui_lang()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -557,14 +616,67 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", se
             self.send(code, json.dumps(data, ensure_ascii=False).encode("utf-8"),
                       "application/json; charset=utf-8")
 
-        def read_json(self):
-            n = int(self.headers.get("Content-Length") or 0)
-            return json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+        def read_json(self) -> dict:
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                raise BadRequest(400, "Content-Length – не число")
+            if n < 0:
+                raise BadRequest(400, "Content-Length отрицательный")
+            if n > MAX_BODY:
+                raise BadRequest(413, f"тело запроса больше {MAX_BODY // 1024 // 1024} МБ")
+            try:
+                body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
+            except ValueError:
+                raise BadRequest(400, "тело запроса – не JSON")
+            if not isinstance(body, dict):
+                raise BadRequest(400, "тело запроса – не объект JSON")
+            return body
+
+        def allowed(self, post=False) -> bool:
+            """Только своя вкладка. Host закрывает DNS-rebinding, Origin, Sec-Fetch-Site и тип тела – запросы с чужих сайтов:
+            простой POST с text/plain браузер шлёт на 127.0.0.1 без предварительной проверки CORS."""
+            port = self.server.server_address[1]
+            hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+            if self.headers.get("Host") not in hosts:
+                return False
+            if not post:
+                return True
+            origin, site = self.headers.get("Origin"), self.headers.get("Sec-Fetch-Site")
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            return ctype == "application/json" and (origin is None or origin in {f"http://{h}" for h in hosts}) \
+                and site in (None, "same-origin")
 
         def do_GET(self):
-            if seen:
-                seen.set()
+            self.guarded(self.get, post=False)
+
+        def do_POST(self):
+            self.guarded(self.post, post=True)
+
+        def guarded(self, fn, post):
+            if not self.allowed(post):
+                return self.send(403, b"forbidden", "text/plain")
+            try:
+                fn()
+            except BadRequest as e:
+                self.send_json({"ok": False, "error": e.msg}, e.code)
+            except ReviewError as e:
+                self.send_json({"ok": False, "error": str(e)}, 500)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # вкладку закрыли посреди ответа
+            except Exception as e:  # сервер живёт, пока открыт редактор: одна кривая просьба не должна его ронять
+                print(f"revizor: ошибка на {self.command} {self.path}: {e!r}", file=sys.stderr)
+                try:
+                    self.send_json({"ok": False, "error": "внутренняя ошибка Ревизора, подробности в выводе open"}, 500)
+                except OSError:
+                    pass
+
+        def get(self):
+            if tab_seen:
+                tab_seen.set()
             path = unquote(self.path.split("?")[0])
+            if "\x00" in path:
+                raise BadRequest(400, "в пути нулевой байт")
             if path == "/":
                 if kind(doc) != "html":
                     return self.send(200, text_shell(doc).encode("utf-8"), "text/html; charset=utf-8")
@@ -580,14 +692,18 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", se
                 self.send(200, f.read_bytes(), "font/woff2")
             elif path.startswith("/doc/"):
                 # Отчёт и всё, что лежит рядом с ним: картинки, стили, скрипты по относительным путям.
-                f = (doc.parent / path[5:]).resolve()
+                rel = path[5:]
+                f = (doc.parent / rel).resolve()
                 if f == doc:
                     if kind(doc) != "html":  # текст открывается только через обёртку на /
                         self.send_response(302)
                         self.send_header("Location", "/")
                         return self.end_headers()
                     return self.send(200, inject(doc.read_text(encoding="utf-8")).encode("utf-8"), "text/html; charset=utf-8")
-                if doc.parent not in f.parents or not f.is_file() or f.name.endswith(".review.json"):
+                if doc.parent not in f.parents or not f.is_file() or is_sidecar(f.name):
+                    return self.send(404, b"not found", "text/plain")
+                # .git, .env и прочее скрытое не отдаётся – ни по пути из запроса, ни через симлинк внутри папки
+                if any(part.startswith(".") for part in (*Path(rel).parts, *f.relative_to(doc.parent).parts)):
                     return self.send(404, b"not found", "text/plain")
                 self.send(200, f.read_bytes(), mimetypes.guess_type(f.name)[0] or "application/octet-stream")
             elif path == "/api/source" and kind(doc) != "html":
@@ -600,28 +716,23 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", se
                 with lock:
                     review = load(doc)
                 self.send_json({"doc": {"name": doc.name, "path": str(doc), "type": kind(doc), "sha": sha(text)},
-                                "review": review, "update": update})
+                                "review": review, "update": update, "ui_lang": lang})
             else:
                 self.send(404, b"not found", "text/plain")
 
-        def do_POST(self):
+        def post(self):
             path = self.path.split("?")[0]
             if path == "/api/scan":
                 return self.request_scan(self.read_json())
             if path not in ("/api/review", "/api/done"):
                 return self.send(404, b"not found", "text/plain")
             body = self.read_json()
+            items = body.get("items", [])
+            if not isinstance(items, list) or not all(isinstance(i, dict) and isinstance(i.get("id"), str) for i in items):
+                raise BadRequest(400, "items – список правок, у каждой строковый id")
             with lock, locked(doc):
                 review = load(doc)
-                # Страница присылает только живые правки; применённые и отклонённые хранит файл.
-                # Агент мог закрыть правку, пока вкладка открыта: такую страница больше не воскрешает.
-                closed = [i for i in review["items"] if i.get("state", "pending") != "pending"]
-                closed_ids = {i["id"] for i in closed}
-                # Правку, которую агент уже забрал в Live Edit, страница не меняет и не удаляет: он применяет её прямо сейчас.
-                taken = {i["id"]: i for i in review["items"] if i.get("state", "pending") == "pending" and i.get("taken")}
-                live = [taken.pop(i["id"], None) or dict(i, state="pending") for i in body.get("items", [])
-                        if i.get("state", "pending") == "pending" and i.get("id") not in closed_ids]
-                review["items"] = closed + live + list(taken.values())
+                closed = merge_items(review, items)
                 if "live" in body:
                     review["live"] = bool(body["live"])
                 if isinstance(body.get("dismissed"), list):
@@ -639,13 +750,12 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", se
 
         def request_scan(self, body):
             """Страница прислала свой текст: агент в цикле `wait` прочитает его и найдёт смысловые приметы нейрослопа."""
-            roots = [r for r in body.get("roots", []) if isinstance(r, dict) and isinstance(r.get("text"), str)]
+            roots = body.get("roots")
+            roots = [r for r in roots if isinstance(r, dict) and isinstance(r.get("text"), str)] if isinstance(roots, list) else []
             if not roots:
                 return self.send_json({"ok": False, "error": "нет текста"}, 400)
             TEXTS.mkdir(parents=True, exist_ok=True)
-            tmp = text_cache(doc).with_suffix(".tmp")
-            tmp.write_text(json.dumps({"doc": str(doc), "roots": roots}, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(text_cache(doc))
+            atomic_write(text_cache(doc), json.dumps({"doc": str(doc), "roots": roots}, ensure_ascii=False))
             with lock, locked(doc):
                 review = load(doc)
                 review["scan"] = {"state": "requested", "requested": now(), "sha": sha(doc.read_text(encoding="utf-8"))}
@@ -660,21 +770,21 @@ def remember_doc(doc: Path) -> None:
         CACHE.mkdir(parents=True, exist_ok=True)
         docs = json.loads(REGISTRY.read_text(encoding="utf-8")) if REGISTRY.is_file() else []
         if str(doc) not in docs:
-            REGISTRY.write_text(json.dumps(docs + [str(doc)], ensure_ascii=False, indent=1), encoding="utf-8")
+            atomic_write(REGISTRY, json.dumps(docs + [str(doc)], ensure_ascii=False, indent=1))
     except (OSError, ValueError):
         pass  # реестр – удобство для обучения, редактору он не нужен
 
 
-def known_sidecars(extra=()) -> list:
-    """Файлы правок для обучения: из реестра открытых документов, плюс разовый поиск Spotlight – чтобы подхватить ревью,
-    сделанные до появления реестра. Без Spotlight – только реестр."""
+def known_sidecars(extra=(), discover=False) -> list:
+    """Файлы правок для обучения: из реестра открытых документов и папок --dir. discover – ещё поиск Spotlight по всему
+    диску, чтобы подхватить ревью до появления реестра. По умолчанию выключен: на диске лежат и чужие файлы правок."""
     found = set()
     if REGISTRY.is_file():
         try:
             found |= {str(sidecar(Path(d))) for d in json.loads(REGISTRY.read_text(encoding="utf-8"))}
         except (OSError, ValueError):
             pass
-    if shutil.which("mdfind"):
+    if discover and shutil.which("mdfind"):
         try:
             out = subprocess.run(["mdfind", "-name", ".review.json"], capture_output=True, text=True, timeout=10).stdout
             found |= {l for l in out.splitlines() if l.endswith(".review.json")}
@@ -685,11 +795,11 @@ def known_sidecars(extra=()) -> list:
     return sorted(f for f in found if Path(f).is_file())
 
 
-def collect_pairs(ledger: dict, extra=()) -> dict:
+def collect_pairs(ledger: dict, extra=(), discover=False) -> dict:
     """Новые сигналы для обучения: правки владельца (пары), отметки «это не нейрослоп», принятые находки проверки."""
     seen = set(ledger.get("seen", []))
     pairs, dismissed, confirmed = [], [], []
-    for f in known_sidecars(extra):
+    for f in known_sidecars(extra, discover):
         try:
             review = json.loads(Path(f).read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -735,10 +845,38 @@ def lang_skill(lang=None):
 
 
 def read_ledger(path: Path) -> dict:
-    ledger = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"seen": [], "stats": {}}
+    try:
+        ledger = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"seen": [], "stats": {}}
+    except ValueError as e:
+        sys.exit(f"журнал обучения {path} не читается ({e}). Почини его: без журнала разобранные пары придут снова.")
     # журналы до 0.8.0 хранили путь#id – перевести в хэши
     ledger["seen"] = [k if re.fullmatch(r"[0-9a-f]{16}", k) else sha(k) for k in ledger.get("seen", [])]
     return ledger
+
+
+def pairs_ack(skill: dict, skills: dict, ledgers: dict) -> int:
+    """Порция разобрана: её записи – в журнал скилла своего языка, статистика правил – туда же."""
+    if not BATCH.is_file():
+        print("Нечего отмечать: порции нет. Сначала revizor.py pairs.")
+        return 1
+    batch = json.loads(BATCH.read_text(encoding="utf-8"))
+    touched = set()
+    for group, field in (("pairs", "taken"), ("confirmed", "taken"), ("dismissed", "dismissed")):
+        for e in batch.get(group, []):
+            path = skill_files(skills.get(e.get("lang"), skill), e.get("lang") or "ru")["ledger"]
+            ledger = ledgers.setdefault(path, read_ledger(Path(path)))
+            touched.add(path)
+            for rule in filter(None, (e.get("rule") or "").split(",")):
+                ledger.setdefault("stats", {}).setdefault(rule, {"taken": 0, "dismissed": 0})[field] += 1
+            ledger["seen"] = sorted(set(ledger.get("seen", [])) | {e["key"]})
+    for path in touched:
+        ledgers[path]["updated"] = now()
+        atomic_write(Path(path), json.dumps(ledgers[path], ensure_ascii=False, indent=1) + "\n")
+    BATCH.unlink()
+    names = ", ".join(sorted({sk["name"] for l, sk in skills.items()
+                              if skill_files(sk, l)["ledger"] in touched})) or skill["name"]
+    print(f"В журнал скилла {names}: {sum(len(batch.get(k, [])) for k in ('pairs', 'dismissed', 'confirmed'))} записей.")
+    return 0
 
 
 def cmd_pairs(args) -> int:
@@ -759,28 +897,8 @@ def cmd_pairs(args) -> int:
         path = Path(skill_files(sk, l)["ledger"])
         ledgers.setdefault(str(path), read_ledger(path))
     if args.ack:
-        if not BATCH.is_file():
-            print("Нечего отмечать: порции нет. Сначала revizor.py pairs.")
-            return 1
-        batch = json.loads(BATCH.read_text(encoding="utf-8"))
-        touched = set()
-        for kind, field in (("pairs", "taken"), ("confirmed", "taken"), ("dismissed", "dismissed")):
-            for e in batch.get(kind, []):
-                path = skill_files(skills.get(e.get("lang"), skill), e.get("lang") or "ru")["ledger"]
-                ledger = ledgers.setdefault(path, read_ledger(Path(path)))
-                touched.add(path)
-                for rule in filter(None, (e.get("rule") or "").split(",")):
-                    ledger.setdefault("stats", {}).setdefault(rule, {"taken": 0, "dismissed": 0})[field] += 1
-                ledger["seen"] = sorted(set(ledger.get("seen", [])) | {e["key"]})
-        for path in touched:
-            ledgers[path]["updated"] = now()
-            Path(path).write_text(json.dumps(ledgers[path], ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-        BATCH.unlink()
-        names = ", ".join(sorted({sk["name"] for l, sk in skills.items()
-                                  if skill_files(sk, l)["ledger"] in touched})) or skill["name"]
-        print(f"В журнал скилла {names}: {sum(len(batch.get(k, [])) for k in ('pairs', 'dismissed', 'confirmed'))} записей.")
-        return 0
-    got = collect_pairs({"seen": sorted({k for lg in ledgers.values() for k in lg.get("seen", [])})}, args.dir or ())
+        return pairs_ack(skill, skills, ledgers)
+    got = collect_pairs({"seen": sorted({k for lg in ledgers.values() for k in lg.get("seen", [])})}, args.dir or (), args.discover)
     total = len(got["pairs"]) + len(got["dismissed"]) + len(got["confirmed"])
     if not args.count and total > args.max:  # первая порция после обновления бывает большой: остальное – в следующий раз
         left = args.max
@@ -795,49 +913,74 @@ def cmd_pairs(args) -> int:
     files = skill_files(skills[main_lang], main_lang)
     out = {"skill": skills[main_lang], "created": created, "files": files, "langs": langs,
            "playbook": str(ROOT / "skill" / "learn.md"), "stats": ledgers[files["ledger"]].get("stats", {}), **got}
-    CACHE.mkdir(parents=True, exist_ok=True)
-    BATCH.write_text(json.dumps(got, ensure_ascii=False), encoding="utf-8")
-    if args.count:
+    if args.count:  # только число: порцию не трогает, иначе --ack отметит то, чего агент не видел
         print(len(got["pairs"]) + len(got["dismissed"]))
-    else:
-        print(json.dumps(out, ensure_ascii=False, indent=1))
+        return 0
+    atomic_write(BATCH, json.dumps(got, ensure_ascii=False))
+    print(json.dumps(out, ensure_ascii=False, indent=1))
     return 0
 
 
-def cmd_open(args) -> int:
+def open_browser(url: str) -> None:
+    """Chrome на macOS, иначе браузер по умолчанию. Не открылся – ссылка уже напечатана, её откроют руками."""
+    if sys.platform == "darwin":
+        try:
+            if subprocess.run(["open", "-a", "Google Chrome", url], capture_output=True).returncode == 0:
+                return
+        except OSError:
+            pass
+    try:
+        if webbrowser.open(url):
+            return
+    except webbrowser.Error:
+        pass
+    print(f"Браузер не открылся сам. Открой ссылку: {url}", file=sys.stderr, flush=True)
+
+
+def resolve_doc(args) -> Path:
     doc = Path(args.file).expanduser().resolve()
     if not doc.is_file():
         sys.exit(f"нет файла: {doc}")
+    return doc
+
+
+def cmd_open(args) -> int:
+    doc = resolve_doc(args)
     if doc.suffix.lower() not in TEXT_SUFFIXES | HTML_SUFFIXES:
         sys.exit(f"поддерживаются {', '.join(sorted(TEXT_SUFFIXES | HTML_SUFFIXES))}: {doc.name}")
+    try:
+        doc.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        sys.exit(f"{doc.name} не в UTF-8. Пересохрани его в UTF-8 и открой снова.")
     remember_doc(doc)
-    review = load(doc)
-    reopen = review["status"] == "done"
-    if review["status"] == "done" and pending(review):
-        print(f"В {sidecar(doc).name} есть {len(pending(review))} неприменённых правок, они откроются в редакторе.",
-              file=sys.stderr)
-    if review["status"] != "open":
-        review["status"] = "open"
-        save(doc, review)
+    with locked(doc):
+        review = load(doc)
+        reopen = review["status"] == "done"
+        if review["status"] == "done" and pending(review):
+            print(f"В {sidecar(doc).name} есть {len(pending(review))} неприменённых правок, они откроются в редакторе.",
+                  file=sys.stderr)
+        if review["status"] != "open":
+            review["status"] = "open"
+            save(doc, review)
 
     update = check_update()
     if update:
         print(f"Доступна новая версия Ревизора: {update['latest']}, у тебя {update['current']}. "
               f"Обновить: revizor.py update (или агенту – «обнови ревизор»).", file=sys.stderr, flush=True)
-    done, seen = threading.Event(), threading.Event()
+    done, tab_seen = threading.Event(), threading.Event()
     prev = last_port(doc)
-    port = args.port or (prev if prev and port_free(prev) else free_port())
+    port = args.port or (prev if prev and is_port_free(prev) else pick_free_port())
     last_port(doc, port)
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(doc, done, update, seen=seen))
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(doc, done, update, tab_seen=tab_seen))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{port}/?v={int(datetime.now().timestamp())}"
     print(f"Редактор: {url}\nПравки: {sidecar(doc)}", file=sys.stderr, flush=True)
     # После «Завершить ревью» вкладка ждёт сервер на старом порту и сама перезагружается.
     # Вкладку закрыли – через пару секунд тишины открываем новую.
-    if reopen and port == prev and seen.wait(REOPEN_WAIT):
+    if reopen and port == prev and tab_seen.wait(REOPEN_WAIT):
         print("Вкладка с прошлого ревью подхватила редактор.", file=sys.stderr, flush=True)
     elif not args.no_browser:
-        subprocess.run(["open", "-a", "Google Chrome", url], check=False)
+        open_browser(url)
 
     try:
         done.wait()
@@ -857,7 +1000,7 @@ def cmd_open(args) -> int:
 
 
 def cmd_show(args) -> int:
-    doc = Path(args.file).expanduser().resolve()
+    doc = resolve_doc(args)
     review = load(doc)
     if args.json:
         print(json.dumps(pending(review), ensure_ascii=False, indent=2))
@@ -867,7 +1010,7 @@ def cmd_show(args) -> int:
 
 
 def cmd_mark(args) -> int:
-    doc = Path(args.file).expanduser().resolve()
+    doc = resolve_doc(args)
     with locked(doc):
         review = load(doc)
         known = {i["id"]: i for i in review["items"]}
@@ -936,7 +1079,7 @@ def scan_task(doc: Path, review: dict) -> str:
 
 def cmd_suggest(args) -> int:
     """Находки агента → файл правок. Цитата обязана быть точной подстрокой текста страницы, иначе подсветить нечего."""
-    doc = Path(args.file).expanduser().resolve()
+    doc = resolve_doc(args)
     raw = sys.stdin.read() if args.findings == "-" else Path(args.findings).expanduser().read_text(encoding="utf-8")
     found = json.loads(raw)
     found = found.get("findings", []) if isinstance(found, dict) else found
@@ -977,7 +1120,7 @@ def cmd_suggest(args) -> int:
 def cmd_wait(args) -> int:
     """Live Edit: ждёт, пока владелец отправит правку из редактора, и выходит со сводкой. Агент применяет, отмечает
     и запускает `wait` снова. Ревью закончено или сервер остановлен – выход без правок, цикл заканчивается."""
-    doc = Path(args.file).expanduser().resolve()
+    doc = resolve_doc(args)
     # wait стартует вместе с повторным open: пока open не открыл ревью заново, в файле ещё старый «завершено»
     grace = time.monotonic() + WAIT_GRACE
     while True:
@@ -1036,6 +1179,7 @@ def main(argv=None) -> int:
     p.add_argument("--ack", action="store_true", help="отметить последнюю порцию разобранной")
     p.add_argument("--count", action="store_true", help="только число новых сигналов")
     p.add_argument("--dir", action="append", help="искать файлы правок ещё и здесь")
+    p.add_argument("--discover", action="store_true", help="ещё и поиск Spotlight по всему диску (macOS), разово для старых ревью")
     p.add_argument("--max", type=int, default=40, help="сколько сигналов в порции, остальное – в следующий раз")
     p.set_defaults(fn=cmd_pairs)
     p = sub.add_parser("update", help="обновить Ревизор из репо (git pull) и показать, что поменялось")
@@ -1043,7 +1187,14 @@ def main(argv=None) -> int:
     p.add_argument("--force", action="store_true", help="с --check: спросить репо сейчас, мимо кэша")
     p.set_defaults(fn=cmd_update)
     args = ap.parse_args(argv)
-    return args.fn(args)
+    if fcntl is None and args.cmd in ("open", "mark", "wait", "suggest"):  # им нужна блокировка файла правок
+        print("revizor: Windows пока не поддерживается, нужен macOS или Linux (можно WSL).", file=sys.stderr)
+        return 2
+    try:
+        return args.fn(args)
+    except ReviewError as e:
+        print(f"revizor: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
