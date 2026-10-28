@@ -140,40 +140,6 @@ def inject(page: str) -> str:
     return page[:m[-1].start()] + OVERLAY_TAG + page[m[-1].start():] if m else page + OVERLAY_TAG
 
 
-MD_CSS = """
-#revizor-md { max-width: 72ch; margin: 0 auto; padding: 76px 28px 140px; font: 17px/1.65 Charter, "Iowan Old Style", Georgia, serif; }
-#revizor-md > :first-child { margin-top: 0; }
-#revizor-md h1, #revizor-md h2, #revizor-md h3, #revizor-md h4, #revizor-md h5, #revizor-md h6 {
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif; line-height: 1.25; margin: 1.7em 0 .5em; text-wrap: balance; }
-#revizor-md h1 { font-size: 32px; font-weight: 750; letter-spacing: -.015em; }
-#revizor-md h2 { font-size: 24px; font-weight: 700; letter-spacing: -.01em; }
-#revizor-md h3 { font-size: 19px; font-weight: 650; }
-#revizor-md h4, #revizor-md h5, #revizor-md h6 { font-size: 16px; font-weight: 650; }
-#revizor-md p { margin: .8em 0; }
-#revizor-md a { color: var(--link); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
-#revizor-md strong { font-weight: 700; }
-#revizor-md del { color: var(--muted); }
-#revizor-md code { font: .86em/1.4 ui-monospace, "SF Mono", Menlo, monospace; background: var(--tint); padding: .12em .38em; border-radius: 6px; }
-#revizor-md pre { background: var(--tint); border-radius: 14px; padding: 14px 18px; overflow-x: auto; margin: 1.1em 0; }
-#revizor-md pre code { background: none; padding: 0; font-size: 13.5px; line-height: 1.6; }
-#revizor-md blockquote { margin: 1em 0; padding: 0 0 0 18px; border-left: 2px solid var(--rule); color: var(--muted); }
-#revizor-md ul, #revizor-md ol { padding-left: 1.4em; margin: .7em 0; }
-#revizor-md li { margin: .12em 0; }
-#revizor-md li > ul, #revizor-md li > ol { margin: .15em 0; }
-#revizor-md li > p { margin: .3em 0; }
-#revizor-md li.task { list-style: none; margin-left: -1.3em; }
-#revizor-md li.task input { margin: 0 .55em 0 0; vertical-align: -.1em; accent-color: var(--link); }
-#revizor-md .table { overflow-x: auto; margin: 1.2em 0; }
-#revizor-md table { border-collapse: collapse; font: 14.5px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; min-width: 60%; }
-#revizor-md th, #revizor-md td { padding: 8px 14px 8px 0; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
-#revizor-md th { font-weight: 650; border-bottom-color: var(--ink); }
-#revizor-md hr { border: 0; height: 1px; background: var(--rule); margin: 2.2em 0; }
-#revizor-md img { max-width: 100%; border-radius: 10px; }
-#revizor-md .raw { color: var(--muted); font: 13.5px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; }
-#revizor-md .fn { font-size: 14.5px; color: var(--muted); }
-html[data-revizor-view="md"] #revizor-root, html[data-revizor-view="plain"] #revizor-md { display: none; }
-html[data-revizor-mode="md"] #revizor-root { padding-top: 76px; }
-"""
 
 
 def text_shell(doc: Path) -> str:
@@ -181,19 +147,13 @@ def text_shell(doc: Path) -> str:
     его заполняет слой правок (вид «Оформление»); <base> нужен, чтобы картинки по относительным путям шли из папки документа."""
     body = html.escape(doc.read_text(encoding="utf-8"), quote=False)
     md = kind(doc) == "md"
+    css = (WEB / "shell.css").read_text(encoding="utf-8") + ((WEB / "markdown.css").read_text(encoding="utf-8") if md else "")
     return f"""<!doctype html>
-<html lang="ru" data-revizor-mode="{"md" if md else "text"}"{' data-revizor-view="md"' if md else ""}><head><meta charset="utf-8">
+<html lang="{doc_lang(doc)}" data-revizor-mode="{"md" if md else "text"}"{' data-revizor-view="md"' if md else ""}><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>{html.escape(doc.name)} · Revizor</title>
 {'<base href="/doc/">' if md else ""}
 <style>
-:root {{ --bg: #f6f5f1; --ink: #1d1c1a; --muted: #5f5c56; --rule: #dcd8ce; --tint: rgba(29, 28, 26, .055); --link: #2457c5; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --bg: #161614; --ink: #ecebe6; --muted: #a8a59d; --rule: #3a3833; --tint: rgba(236, 235, 230, .07); --link: #8db0ff; }} }}
-html, body {{ margin: 0; background: var(--bg); color: var(--ink); }}
-::selection {{ background: color-mix(in srgb, var(--link) 26%, transparent); }}
-#revizor-root {{ max-width: 72ch; margin: 0 auto; padding: 40px 24px 120px; white-space: pre-wrap; word-wrap: break-word;
-  font: 16px/1.65 Charter, Georgia, serif; }}
-{MD_CSS if md else ""}
-</style></head><body><main id="revizor-root">{body}</main>{'<article id="revizor-md"></article>' if md else ""}{OVERLAY_TAG}</body></html>
+{css}</style></head><body><main id="revizor-root">{body}</main>{'<article id="revizor-md"></article>' if md else ""}{OVERLAY_TAG}</body></html>
 """
 
 
@@ -591,6 +551,19 @@ def last_port(doc: Path, port=None):
     atomic_write(f, json.dumps(ports))
 
 
+def merge_items(review: dict, items: list) -> list:
+    """Правки со страницы → файл. Страница присылает только живые правки; применённые и отклонённые хранит файл.
+    Агент мог закрыть правку, пока вкладка открыта: такую страница больше не воскрешает. Правку, которую агент уже
+    забрал в Live Edit, страница не меняет и не удаляет: он применяет её прямо сейчас. Возвращает закрытые правки."""
+    closed = [i for i in review["items"] if i.get("state", "pending") != "pending"]
+    closed_ids = {i["id"] for i in closed}
+    taken = {i["id"]: i for i in review["items"] if i.get("state", "pending") == "pending" and i.get("taken")}
+    live = [taken.pop(i["id"], None) or dict(i, state="pending") for i in items
+            if i.get("state", "pending") == "pending" and i.get("id") not in closed_ids]
+    review["items"] = closed + live + list(taken.values())
+    return closed
+
+
 def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", tab_seen=None):
     doc = doc.resolve()
     lock = threading.Lock()
@@ -726,15 +699,7 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
                 raise BadRequest(400, "items – список правок, у каждой строковый id")
             with lock, locked(doc):
                 review = load(doc)
-                # Страница присылает только живые правки; применённые и отклонённые хранит файл.
-                # Агент мог закрыть правку, пока вкладка открыта: такую страница больше не воскрешает.
-                closed = [i for i in review["items"] if i.get("state", "pending") != "pending"]
-                closed_ids = {i["id"] for i in closed}
-                # Правку, которую агент уже забрал в Live Edit, страница не меняет и не удаляет: он применяет её прямо сейчас.
-                taken = {i["id"]: i for i in review["items"] if i.get("state", "pending") == "pending" and i.get("taken")}
-                live = [taken.pop(i["id"], None) or dict(i, state="pending") for i in items
-                        if i.get("state", "pending") == "pending" and i.get("id") not in closed_ids]
-                review["items"] = closed + live + list(taken.values())
+                closed = merge_items(review, items)
                 if "live" in body:
                     review["live"] = bool(body["live"])
                 if isinstance(body.get("dismissed"), list):
@@ -856,6 +821,31 @@ def read_ledger(path: Path) -> dict:
     return ledger
 
 
+def pairs_ack(skill: dict, skills: dict, ledgers: dict) -> int:
+    """Порция разобрана: её записи – в журнал скилла своего языка, статистика правил – туда же."""
+    if not BATCH.is_file():
+        print("Нечего отмечать: порции нет. Сначала revizor.py pairs.")
+        return 1
+    batch = json.loads(BATCH.read_text(encoding="utf-8"))
+    touched = set()
+    for group, field in (("pairs", "taken"), ("confirmed", "taken"), ("dismissed", "dismissed")):
+        for e in batch.get(group, []):
+            path = skill_files(skills.get(e.get("lang"), skill), e.get("lang") or "ru")["ledger"]
+            ledger = ledgers.setdefault(path, read_ledger(Path(path)))
+            touched.add(path)
+            for rule in filter(None, (e.get("rule") or "").split(",")):
+                ledger.setdefault("stats", {}).setdefault(rule, {"taken": 0, "dismissed": 0})[field] += 1
+            ledger["seen"] = sorted(set(ledger.get("seen", [])) | {e["key"]})
+    for path in touched:
+        ledgers[path]["updated"] = now()
+        atomic_write(Path(path), json.dumps(ledgers[path], ensure_ascii=False, indent=1) + "\n")
+    BATCH.unlink()
+    names = ", ".join(sorted({sk["name"] for l, sk in skills.items()
+                              if skill_files(sk, l)["ledger"] in touched})) or skill["name"]
+    print(f"В журнал скилла {names}: {sum(len(batch.get(k, [])) for k in ('pairs', 'dismissed', 'confirmed'))} записей.")
+    return 0
+
+
 def cmd_pairs(args) -> int:
     """Порция для обучения скилла стиля. Нет скилла – подключается слабый (только SKILL.md про стиль) или создаётся
     из шаблона: настраивать ничего не нужно."""
@@ -874,27 +864,7 @@ def cmd_pairs(args) -> int:
         path = Path(skill_files(sk, l)["ledger"])
         ledgers.setdefault(str(path), read_ledger(path))
     if args.ack:
-        if not BATCH.is_file():
-            print("Нечего отмечать: порции нет. Сначала revizor.py pairs.")
-            return 1
-        batch = json.loads(BATCH.read_text(encoding="utf-8"))
-        touched = set()
-        for group, field in (("pairs", "taken"), ("confirmed", "taken"), ("dismissed", "dismissed")):
-            for e in batch.get(group, []):
-                path = skill_files(skills.get(e.get("lang"), skill), e.get("lang") or "ru")["ledger"]
-                ledger = ledgers.setdefault(path, read_ledger(Path(path)))
-                touched.add(path)
-                for rule in filter(None, (e.get("rule") or "").split(",")):
-                    ledger.setdefault("stats", {}).setdefault(rule, {"taken": 0, "dismissed": 0})[field] += 1
-                ledger["seen"] = sorted(set(ledger.get("seen", [])) | {e["key"]})
-        for path in touched:
-            ledgers[path]["updated"] = now()
-            atomic_write(Path(path), json.dumps(ledgers[path], ensure_ascii=False, indent=1) + "\n")
-        BATCH.unlink()
-        names = ", ".join(sorted({sk["name"] for l, sk in skills.items()
-                                  if skill_files(sk, l)["ledger"] in touched})) or skill["name"]
-        print(f"В журнал скилла {names}: {sum(len(batch.get(k, [])) for k in ('pairs', 'dismissed', 'confirmed'))} записей.")
-        return 0
+        return pairs_ack(skill, skills, ledgers)
     got = collect_pairs({"seen": sorted({k for lg in ledgers.values() for k in lg.get("seen", [])})}, args.dir or (), args.discover)
     total = len(got["pairs"]) + len(got["dismissed"]) + len(got["confirmed"])
     if not args.count and total > args.max:  # первая порция после обновления бывает большой: остальное – в следующий раз

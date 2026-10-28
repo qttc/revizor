@@ -57,7 +57,7 @@ python3 revizor.py --version
   "doc_sha": "9f2c…",
   "register": "report",
   "register_auto": true,
-  "status": "open | done",
+  "status": "open | done | stopped",
   "created": "2026-10-21T14:02:11+03:00",
   "updated": "2026-10-21T14:20:40+03:00",
   "items": [
@@ -83,6 +83,9 @@ python3 revizor.py --version
 }
 ```
 
+Схема – [review.schema.json](review.schema.json). Обязательны `version`, `doc`, `status`, `items`, у правки – `id` и `kind`. Нет `state` – правка ждёт агента.
+
+- `status`: `open` – редактор открыт, `done` – нажато «Завершить ревью», `stopped` – сервер остановили без него.
 - `scope`: `text` – фрагмент, `block` – элемент страницы, `doc` – весь документ.
 - `where` – слайд, раздел или ближайший заголовок над правкой.
 - `frame` – заголовок фрейма слайда, если правка внутри него. `start`, `end` и `selector` тогда считаются внутри фрейма.
@@ -95,9 +98,26 @@ python3 revizor.py --version
 - `register`: `report`, `deck`, `slack`, `spec`, `doc`, `email`, `client`, `other` или `null`. `register_auto` – формат определил Ревизор, владелец его не менял. В файлах 0.1 поля нет, заданный там формат считается ручным.
 - Стилевая пара – это `kind: "edit"`: `quote` → `replacement`, плюс `why` и `register`. Комментарии в пары не идут.
 
+## Совместимость
+
+С 1.0.0 версии идут по SemVer. Ломающее изменение того, что ниже, – только в мажорной версии, с миграцией в CHANGELOG.
+
+Стабильно:
+- команды и флаги CLI, коды выхода: 0 – успех, 1 – ошибка ввода (нет файла, неизвестный id), 2 – файл правок не читается или платформа не поддерживается, 3 – `pairs` вызван не из папки `learn_from`, 130 – `open` остановлен по Ctrl-C;
+- `show --json` и JSON на выходе `pairs`;
+- формат `*.review.json` версии 1 по [схеме](review.schema.json). Новые необязательные поля могут появляться в минорных версиях, читатель их пропускает;
+- манифест скилла `revizor.json`, правила `revizor-rules.json`, журнал `revizor-learned.json`;
+- ключи `~/.config/revizor/config.json` (`style_skill`, `learn_from`) и переменные `REVIZOR_STYLE_SKILL`, `REVIZOR_NO_UPDATE_CHECK`.
+
+Внутреннее, меняется без предупреждения:
+- текстовые сводки `open`, `wait`, `show` без `--json`. Их читает агент по скиллу, скилл обновляется вместе с ними;
+- HTTP `/api/*` между сервером и слоем правок;
+- файлы в `~/.cache/revizor`.
+
 ## Устройство
 
 - `revizor.py` – сервер на `http.server` и CLI. Слушает только `127.0.0.1` и раздаёт только папку документа, без скрытых файлов и папок. Файлы правок `*.review.json` закрыты даже внутри неё, без учёта регистра. Запросы с чужим Host отклоняются (DNS-rebinding), POST – только `application/json` со своим Origin. Тело до 10 МБ. Запись в файл правок атомарная: через временный файл и `replace`.
+- `web/shell.css`, `web/markdown.css` – страница для `.md` и `.txt`, сервер вставляет их в `<style>`. `lang` страницы – по языку документа.
 - `web/overlay.js` – слой правок, один файл без сборки. Панель живёт в shadow DOM, стили страницы её не задевают. Подсветка – CSS Custom Highlight API (Chrome 105+), DOM документа не меняется. За подменой `<html>` и догрузкой текста в слайдах следит `MutationObserver`.
 - `web/vendor/` – Motion 11.11.17 (MIT), Playfair Display, кириллица и латиница (OFL), и парсер Markdown. Сервер отдаёт Motion вместе со слоем в обёртке: AMD и CommonJS страницы он не видит, её `window.Motion` не трогает, слою достаётся как `window.__revizorMotion`. Без Motion анимации идут через Web Animations API. При `prefers-reduced-motion` остаются только прозрачность и цвет.
 - Шрифт объявляется в документе: `@font-face` внутри shadow DOM Chrome не подхватывает.

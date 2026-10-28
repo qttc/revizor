@@ -18,6 +18,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import revizor  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 
 def post(url, data):
     req = urllib.request.Request(url, json.dumps(data).encode(), {"Content-Type": "application/json"})
@@ -193,6 +195,34 @@ class HardeningTest(ServerTest.__base__):
         with redirect_stderr(err):
             self.assertEqual(revizor.main(["show", str(self.doc)]), 2)
         self.assertIn("не читается", err.getvalue())
+
+
+class SchemaTest(ServerTest.__base__):
+    """Файл правок, который пишет Ревизор, проходит docs/review.schema.json – это контракт формата v1."""
+
+    setUp, tearDown, edit = ServerTest.setUp, ServerTest.tearDown, ServerTest.edit
+
+    def test_written_file_matches_schema(self):
+        from schema_check import errors
+        saved = revizor.TEXTS
+        self.addCleanup(setattr, revizor, "TEXTS", saved)
+        revizor.TEXTS = Path(self.tmp.name) / "texts"
+        post(self.base + "/api/review", {"register": "report", "live": True, "view": "md",
+                                         "items": [dict(self.edit("a"), sent="t"), {"id": "b", "kind": "comment", "scope": "doc",
+                                                                                    "comment": "короче", "state": "pending"}],
+                                         "dismissed": [{"rule": "ne-pro", "quote": "не про", "prefix": "это "}]})
+        post(self.base + "/api/scan", {"roots": [{"key": "", "text": "Конверсия выросла на фоне нового онбординга."}]})
+        f = Path(self.tmp.name) / "f.json"
+        f.write_text(json.dumps([{"quote": "Конверсия выросла", "rewrite": None, "rule": "x"}]), encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            revizor.main(["suggest", str(self.doc), str(f)])
+            revizor.main(["mark", str(self.doc), "a", "--state", "applied"])
+        post(self.base + "/api/done", {"items": [{"id": "b", "kind": "comment", "scope": "doc", "comment": "короче"}]})
+        review = revizor.load(self.doc)
+        self.assertEqual(errors(review), [])
+        self.assertEqual(errors(dict(review, status="closed", items=[{"id": 1}])),
+                         ["$.status: 'closed' не из ['open', 'done', 'stopped']", "$.items[0]: нет поля kind",
+                          "$.items[0].id: int вместо string"])
 
 
 class SidecarTest(unittest.TestCase):
