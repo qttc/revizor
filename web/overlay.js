@@ -1037,9 +1037,9 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
           if (!m[0]) continue;
           const start = m.index, end = start + m[0].length;
           if (zones.some(([a, b]) => start < b && a < end)) continue;
-          if (rule.lang === "ru") {
+          if (rule.lang === "ru" || rule.lang === "en") { // правило языка – только на строках этого языка
             const ls = text.lastIndexOf("\n", start) + 1, le = text.indexOf("\n", end);
-            if (!CYR_RX.test(text.slice(ls, le < 0 ? text.length : le))) continue;
+            if (CYR_RX.test(text.slice(ls, le < 0 ? text.length : le)) !== (rule.lang === "ru")) continue;
           }
           if (!IS_TEXT || r !== main) { // в HTML код и кнопки не проверяем
             const n = idx.nodes.find((x, i) => x.start <= start && (idx.nodes[i + 1] ? idx.nodes[i + 1].start > start : true));
