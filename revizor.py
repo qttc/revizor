@@ -26,6 +26,7 @@ import os
 import re
 import socket
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -73,13 +74,28 @@ def sidecar(doc: Path) -> Path:
     if full.exists():
         return full
     if short.exists():
-        try:
-            owner = json.loads(short.read_text(encoding="utf-8")).get("doc")
-        except (OSError, ValueError, AttributeError):
-            owner = None
-        return short if owner in (None, doc.name) else full
+        owner = _owner(short)
+        # регистр не сверяем: на macOS Report.md и report.md – один файл, а resolve() оставляет регистр из команды
+        return short if owner is None or owner.casefold() == doc.name.casefold() else full
     twins = [doc.with_suffix(x) for x in TEXT_SUFFIXES | HTML_SUFFIXES if x != doc.suffix.lower()]
     return full if any(t.exists() for t in twins) else short
+
+
+_OWNERS = {}  # файл правок → (mtime, doc): sidecar() зовут на каждый опрос вкладки, разбирать JSON каждый раз незачем
+
+
+def _owner(short: Path):
+    try:
+        mtime = short.stat().st_mtime_ns
+        cached = _OWNERS.get(short)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        owner = json.loads(short.read_text(encoding="utf-8")).get("doc")
+    except (OSError, ValueError, AttributeError):
+        return None
+    owner = owner if isinstance(owner, str) else None
+    _OWNERS[short] = (mtime, owner)
+    return owner
 
 
 def is_sidecar(name: str) -> bool:
@@ -98,10 +114,18 @@ class ReviewError(Exception):
 
 
 def atomic_write(path: Path, text: str) -> None:
+    """Через временный файл со своим именем: два процесса пишут ports.json одновременно и не мешают друг другу.
+    Имя начинается с точки – скрытый файл сервер не отдаёт."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def sha(text: str) -> str:
@@ -320,8 +344,7 @@ def check_update(force: bool = False):
         latest = latest_release()
         if latest:
             try:
-                UPDATE_CACHE.parent.mkdir(parents=True, exist_ok=True)
-                UPDATE_CACHE.write_text(json.dumps({"checked": time.time(), "latest": latest}), encoding="utf-8")
+                atomic_write(UPDATE_CACHE, json.dumps({"checked": time.time(), "latest": latest}))
             except OSError:
                 pass
     if latest and parse_version(latest) > parse_version(__version__):
@@ -575,6 +598,7 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
     lock = threading.Lock()
     if skill == "auto":
         skill = find_style_skill(lang=doc_lang(doc))
+    lang = ui_lang()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -597,7 +621,9 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
                 n = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 raise BadRequest(400, "Content-Length – не число")
-            if n < 0 or n > MAX_BODY:
+            if n < 0:
+                raise BadRequest(400, "Content-Length отрицательный")
+            if n > MAX_BODY:
                 raise BadRequest(413, f"тело запроса больше {MAX_BODY // 1024 // 1024} МБ")
             try:
                 body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
@@ -667,8 +693,6 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
             elif path.startswith("/doc/"):
                 # Отчёт и всё, что лежит рядом с ним: картинки, стили, скрипты по относительным путям.
                 rel = path[5:]
-                if any(part.startswith(".") for part in Path(rel).parts):  # .git, .env и прочее скрытое не отдаётся
-                    return self.send(404, b"not found", "text/plain")
                 f = (doc.parent / rel).resolve()
                 if f == doc:
                     if kind(doc) != "html":  # текст открывается только через обёртку на /
@@ -677,6 +701,9 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
                         return self.end_headers()
                     return self.send(200, inject(doc.read_text(encoding="utf-8")).encode("utf-8"), "text/html; charset=utf-8")
                 if doc.parent not in f.parents or not f.is_file() or is_sidecar(f.name):
+                    return self.send(404, b"not found", "text/plain")
+                # .git, .env и прочее скрытое не отдаётся – ни по пути из запроса, ни через симлинк внутри папки
+                if any(part.startswith(".") for part in (*Path(rel).parts, *f.relative_to(doc.parent).parts)):
                     return self.send(404, b"not found", "text/plain")
                 self.send(200, f.read_bytes(), mimetypes.guess_type(f.name)[0] or "application/octet-stream")
             elif path == "/api/source" and kind(doc) != "html":
@@ -689,7 +716,7 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
                 with lock:
                     review = load(doc)
                 self.send_json({"doc": {"name": doc.name, "path": str(doc), "type": kind(doc), "sha": sha(text)},
-                                "review": review, "update": update, "ui_lang": ui_lang()})
+                                "review": review, "update": update, "ui_lang": lang})
             else:
                 self.send(404, b"not found", "text/plain")
 
@@ -1160,7 +1187,7 @@ def main(argv=None) -> int:
     p.add_argument("--force", action="store_true", help="с --check: спросить репо сейчас, мимо кэша")
     p.set_defaults(fn=cmd_update)
     args = ap.parse_args(argv)
-    if fcntl is None and args.cmd not in ("style",):
+    if fcntl is None and args.cmd in ("open", "mark", "wait", "suggest"):  # им нужна блокировка файла правок
         print("revizor: Windows пока не поддерживается, нужен macOS или Linux (можно WSL).", file=sys.stderr)
         return 2
     try:

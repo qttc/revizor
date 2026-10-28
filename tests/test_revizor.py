@@ -59,7 +59,15 @@ class ServerTest(unittest.TestCase):
                 os.environ["REVIZOR_UI_LANG"] = saved[1]
         self.addCleanup(restore)
         revizor.CONFIG = Path(self.tmp.name) / "config.json"
-        state = lambda: json.loads(urllib.request.urlopen(self.base + "/api/state").read())
+
+        def state():  # язык читается при старте сервера – на каждый случай свой сервер
+            server = ThreadingHTTPServer(("127.0.0.1", 0), revizor.make_handler(self.doc, threading.Event()))
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/api/state").read())
+            finally:
+                server.shutdown()
+                server.server_close()
         self.assertIsNone(state()["ui_lang"])  # не задан – страница выберет по языку браузера
         revizor.CONFIG.write_text(json.dumps({"ui_lang": "en"}), encoding="utf-8")
         self.assertEqual(state()["ui_lang"], "en")
@@ -202,11 +210,24 @@ class HardeningTest(ServerTest.__base__):
             self.assertEqual(self.raw("GET", path)[0], 404, path)
         self.assertEqual(self.raw("GET", "/doc/img.png"), (200, b"png"))
         self.assertEqual(self.raw("GET", "/doc/%00")[0], 400)
+        os.symlink(d / "sub" / ".git", d / "git-link")  # симлинк внутри папки на скрытую папку
+        self.assertEqual(self.raw("GET", "/doc/git-link/config")[0], 404)
+
+    def test_hidden_html_doc_itself_opens(self):
+        d = Path(self.tmp.name)
+        hidden = d / ".draft.html"
+        hidden.write_text("<p>черновик</p>", encoding="utf-8")
+        server = ThreadingHTTPServer(("127.0.0.1", 0), revizor.make_handler(hidden, threading.Event()))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        page = urllib.request.urlopen(f"http://127.0.0.1:{server.server_address[1]}/").read().decode()
+        self.assertIn("черновик", page)
 
     def test_bad_bodies_get_errors_and_server_survives(self):
         for body in (b"[]", b"{bad", json.dumps({"items": [1]}).encode(), json.dumps({"items": [{"kind": "edit"}]}).encode()):
             self.assertEqual(self.raw("POST", "/api/review", body, {"Content-Type": "application/json"})[0], 400, body)
-        self.assertEqual(self.raw("POST", "/api/review", b"", {"Content-Type": "application/json", "Content-Length": "-1"})[0], 413)
+        self.assertEqual(self.raw("POST", "/api/review", b"", {"Content-Type": "application/json", "Content-Length": "-1"})[0], 400)
         self.assertEqual(self.raw("POST", "/api/scan", b"x" * 10,
                                   {"Content-Type": "application/json", "Content-Length": str(revizor.MAX_BODY + 1)})[0], 413)
         self.assertEqual(self.raw("GET", "/api/state")[0], 200)
@@ -272,6 +293,24 @@ class SidecarTest(unittest.TestCase):
         html.write_text("<p>x</p>", encoding="utf-8")
         self.assertEqual(revizor.sidecar(md).name, "report.md.review.json")
         self.assertEqual(revizor.sidecar(html).name, "report.html.review.json")
+
+    def test_owner_case_does_not_split_history(self):
+        md = self.d / "report.md"
+        md.write_text("x", encoding="utf-8")
+        (self.d / "report.html").write_text("<p>x</p>", encoding="utf-8")
+        (self.d / "report.review.json").write_text(json.dumps({"version": 1, "doc": "Report.md", "status": "open", "items": []}),
+                                                   encoding="utf-8")
+        self.assertEqual(revizor.sidecar(md).name, "report.review.json")
+
+    def test_atomic_write_leaves_no_temp_and_survives_parallel_writers(self):
+        f = self.d / "ports.json"
+        ths = [threading.Thread(target=revizor.atomic_write, args=(f, json.dumps({"n": n}))) for n in range(20)]
+        for t in ths:
+            t.start()
+        for t in ths:
+            t.join()
+        self.assertIn(json.loads(f.read_text(encoding="utf-8"))["n"], range(20))
+        self.assertEqual(sorted(p.name for p in self.d.iterdir()), ["ports.json"])
 
     def test_old_short_file_stays_with_its_doc(self):
         md, html = self.d / "report.md", self.d / "report.html"
