@@ -18,7 +18,6 @@
 import argparse
 import shutil
 import contextlib
-import fcntl
 import hashlib
 import html
 import json
@@ -30,10 +29,16 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, unquote
+
+try:
+    import fcntl
+except ImportError:  # Windows: блокировки файла правок на fcntl, без них два процесса потеряют правки
+    fcntl = None
 
 __version__ = "0.9.0"
 
@@ -388,10 +393,22 @@ def cmd_update(args) -> int:
     if dirty:
         sys.exit("Обновление остановлено: в папке Ревизора есть свои изменения – " + ", ".join(dirty))
     old = __version__
-    pull = git("pull", "--ff-only")
-    if pull.returncode != 0:
-        sys.exit("git pull не прошёл:\n" + (pull.stderr or pull.stdout).strip())
-    subprocess.run([str(ROOT / "install.sh")], check=False)
+    # ставится последний релиз: тег vX.Y.Z. Ветка между релизами может уйти вперёд невыпущенным кодом
+    fetch = git("fetch", "--tags", "--quiet", "origin")
+    if fetch.returncode != 0:
+        sys.exit("git fetch не прошёл:\n" + (fetch.stderr or fetch.stdout).strip())
+    tags = [t for t in git("tag", "--list", "v*").stdout.split() if parse_version(t)]
+    if not tags:
+        sys.exit("В репо нет релизных тегов vX.Y.Z.")
+    tag = max(tags, key=parse_version)
+    if parse_version(tag) <= parse_version(old):
+        print(f"Уже последняя версия: {old}.")
+        return 0
+    move = git("merge", "--ff-only", "--quiet", tag)
+    if move.returncode != 0:
+        sys.exit(f"Не получилось перейти на {tag}: в папке Ревизора свои коммиты или не та ветка.\n"
+                 + (move.stderr or move.stdout).strip())
+    subprocess.run(["bash", str(ROOT / "install.sh")], check=False)
     new = re.search(r'__version__ = "([^"]+)"', (ROOT / "revizor.py").read_text(encoding="utf-8")).group(1)
     if new == old:
         print(f"Уже последняя версия: {old}.")
@@ -543,13 +560,13 @@ def cmd_style(args) -> int:
     return 0
 
 
-def free_port() -> int:
+def pick_free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
-def port_free(port: int) -> bool:
+def is_port_free(port: int) -> bool:
     with socket.socket() as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # как у HTTPServer: TIME_WAIT от прошлого сервера не мешает
         try:
@@ -574,7 +591,7 @@ def last_port(doc: Path, port=None):
     atomic_write(f, json.dumps(ports))
 
 
-def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", seen=None):
+def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", tab_seen=None):
     doc = doc.resolve()
     lock = threading.Lock()
     if skill == "auto":
@@ -650,8 +667,8 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", se
                     pass
 
         def get(self):
-            if seen:
-                seen.set()
+            if tab_seen:
+                tab_seen.set()
             path = unquote(self.path.split("?")[0])
             if "\x00" in path:
                 raise BadRequest(400, "в пути нулевой байт")
@@ -760,16 +777,16 @@ def remember_doc(doc: Path) -> None:
         pass  # реестр – удобство для обучения, редактору он не нужен
 
 
-def known_sidecars(extra=()) -> list:
-    """Файлы правок для обучения: из реестра открытых документов, плюс разовый поиск Spotlight – чтобы подхватить ревью,
-    сделанные до появления реестра. Без Spotlight – только реестр."""
+def known_sidecars(extra=(), discover=False) -> list:
+    """Файлы правок для обучения: из реестра открытых документов и папок --dir. discover – ещё поиск Spotlight по всему
+    диску, чтобы подхватить ревью до появления реестра. По умолчанию выключен: на диске лежат и чужие файлы правок."""
     found = set()
     if REGISTRY.is_file():
         try:
             found |= {str(sidecar(Path(d))) for d in json.loads(REGISTRY.read_text(encoding="utf-8"))}
         except (OSError, ValueError):
             pass
-    if shutil.which("mdfind"):
+    if discover and shutil.which("mdfind"):
         try:
             out = subprocess.run(["mdfind", "-name", ".review.json"], capture_output=True, text=True, timeout=10).stdout
             found |= {l for l in out.splitlines() if l.endswith(".review.json")}
@@ -780,11 +797,11 @@ def known_sidecars(extra=()) -> list:
     return sorted(f for f in found if Path(f).is_file())
 
 
-def collect_pairs(ledger: dict, extra=()) -> dict:
+def collect_pairs(ledger: dict, extra=(), discover=False) -> dict:
     """Новые сигналы для обучения: правки владельца (пары), отметки «это не нейрослоп», принятые находки проверки."""
     seen = set(ledger.get("seen", []))
     pairs, dismissed, confirmed = [], [], []
-    for f in known_sidecars(extra):
+    for f in known_sidecars(extra, discover):
         try:
             review = json.loads(Path(f).read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -862,8 +879,8 @@ def cmd_pairs(args) -> int:
             return 1
         batch = json.loads(BATCH.read_text(encoding="utf-8"))
         touched = set()
-        for kind, field in (("pairs", "taken"), ("confirmed", "taken"), ("dismissed", "dismissed")):
-            for e in batch.get(kind, []):
+        for group, field in (("pairs", "taken"), ("confirmed", "taken"), ("dismissed", "dismissed")):
+            for e in batch.get(group, []):
                 path = skill_files(skills.get(e.get("lang"), skill), e.get("lang") or "ru")["ledger"]
                 ledger = ledgers.setdefault(path, read_ledger(Path(path)))
                 touched.add(path)
@@ -878,7 +895,7 @@ def cmd_pairs(args) -> int:
                                   if skill_files(sk, l)["ledger"] in touched})) or skill["name"]
         print(f"В журнал скилла {names}: {sum(len(batch.get(k, [])) for k in ('pairs', 'dismissed', 'confirmed'))} записей.")
         return 0
-    got = collect_pairs({"seen": sorted({k for lg in ledgers.values() for k in lg.get("seen", [])})}, args.dir or ())
+    got = collect_pairs({"seen": sorted({k for lg in ledgers.values() for k in lg.get("seen", [])})}, args.dir or (), args.discover)
     total = len(got["pairs"]) + len(got["dismissed"]) + len(got["confirmed"])
     if not args.count and total > args.max:  # первая порция после обновления бывает большой: остальное – в следующий раз
         left = args.max
@@ -893,19 +910,39 @@ def cmd_pairs(args) -> int:
     files = skill_files(skills[main_lang], main_lang)
     out = {"skill": skills[main_lang], "created": created, "files": files, "langs": langs,
            "playbook": str(ROOT / "skill" / "learn.md"), "stats": ledgers[files["ledger"]].get("stats", {}), **got}
-    CACHE.mkdir(parents=True, exist_ok=True)
-    atomic_write(BATCH, json.dumps(got, ensure_ascii=False))
-    if args.count:
+    if args.count:  # только число: порцию не трогает, иначе --ack отметит то, чего агент не видел
         print(len(got["pairs"]) + len(got["dismissed"]))
-    else:
-        print(json.dumps(out, ensure_ascii=False, indent=1))
+        return 0
+    atomic_write(BATCH, json.dumps(got, ensure_ascii=False))
+    print(json.dumps(out, ensure_ascii=False, indent=1))
     return 0
 
 
-def cmd_open(args) -> int:
+def open_browser(url: str) -> None:
+    """Chrome на macOS, иначе браузер по умолчанию. Не открылся – ссылка уже напечатана, её откроют руками."""
+    if sys.platform == "darwin":
+        try:
+            if subprocess.run(["open", "-a", "Google Chrome", url], capture_output=True).returncode == 0:
+                return
+        except OSError:
+            pass
+    try:
+        if webbrowser.open(url):
+            return
+    except webbrowser.Error:
+        pass
+    print(f"Браузер не открылся сам. Открой ссылку: {url}", file=sys.stderr, flush=True)
+
+
+def resolve_doc(args) -> Path:
     doc = Path(args.file).expanduser().resolve()
     if not doc.is_file():
         sys.exit(f"нет файла: {doc}")
+    return doc
+
+
+def cmd_open(args) -> int:
+    doc = resolve_doc(args)
     if doc.suffix.lower() not in TEXT_SUFFIXES | HTML_SUFFIXES:
         sys.exit(f"поддерживаются {', '.join(sorted(TEXT_SUFFIXES | HTML_SUFFIXES))}: {doc.name}")
     try:
@@ -927,20 +964,20 @@ def cmd_open(args) -> int:
     if update:
         print(f"Доступна новая версия Ревизора: {update['latest']}, у тебя {update['current']}. "
               f"Обновить: revizor.py update (или агенту – «обнови ревизор»).", file=sys.stderr, flush=True)
-    done, seen = threading.Event(), threading.Event()
+    done, tab_seen = threading.Event(), threading.Event()
     prev = last_port(doc)
-    port = args.port or (prev if prev and port_free(prev) else free_port())
+    port = args.port or (prev if prev and is_port_free(prev) else pick_free_port())
     last_port(doc, port)
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(doc, done, update, seen=seen))
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(doc, done, update, tab_seen=tab_seen))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{port}/?v={int(datetime.now().timestamp())}"
     print(f"Редактор: {url}\nПравки: {sidecar(doc)}", file=sys.stderr, flush=True)
     # После «Завершить ревью» вкладка ждёт сервер на старом порту и сама перезагружается.
     # Вкладку закрыли – через пару секунд тишины открываем новую.
-    if reopen and port == prev and seen.wait(REOPEN_WAIT):
+    if reopen and port == prev and tab_seen.wait(REOPEN_WAIT):
         print("Вкладка с прошлого ревью подхватила редактор.", file=sys.stderr, flush=True)
     elif not args.no_browser:
-        subprocess.run(["open", "-a", "Google Chrome", url], check=False)
+        open_browser(url)
 
     try:
         done.wait()
@@ -960,7 +997,7 @@ def cmd_open(args) -> int:
 
 
 def cmd_show(args) -> int:
-    doc = Path(args.file).expanduser().resolve()
+    doc = resolve_doc(args)
     review = load(doc)
     if args.json:
         print(json.dumps(pending(review), ensure_ascii=False, indent=2))
@@ -970,7 +1007,7 @@ def cmd_show(args) -> int:
 
 
 def cmd_mark(args) -> int:
-    doc = Path(args.file).expanduser().resolve()
+    doc = resolve_doc(args)
     with locked(doc):
         review = load(doc)
         known = {i["id"]: i for i in review["items"]}
@@ -1039,7 +1076,7 @@ def scan_task(doc: Path, review: dict) -> str:
 
 def cmd_suggest(args) -> int:
     """Находки агента → файл правок. Цитата обязана быть точной подстрокой текста страницы, иначе подсветить нечего."""
-    doc = Path(args.file).expanduser().resolve()
+    doc = resolve_doc(args)
     raw = sys.stdin.read() if args.findings == "-" else Path(args.findings).expanduser().read_text(encoding="utf-8")
     found = json.loads(raw)
     found = found.get("findings", []) if isinstance(found, dict) else found
@@ -1080,7 +1117,7 @@ def cmd_suggest(args) -> int:
 def cmd_wait(args) -> int:
     """Live Edit: ждёт, пока владелец отправит правку из редактора, и выходит со сводкой. Агент применяет, отмечает
     и запускает `wait` снова. Ревью закончено или сервер остановлен – выход без правок, цикл заканчивается."""
-    doc = Path(args.file).expanduser().resolve()
+    doc = resolve_doc(args)
     # wait стартует вместе с повторным open: пока open не открыл ревью заново, в файле ещё старый «завершено»
     grace = time.monotonic() + WAIT_GRACE
     while True:
@@ -1139,6 +1176,7 @@ def main(argv=None) -> int:
     p.add_argument("--ack", action="store_true", help="отметить последнюю порцию разобранной")
     p.add_argument("--count", action="store_true", help="только число новых сигналов")
     p.add_argument("--dir", action="append", help="искать файлы правок ещё и здесь")
+    p.add_argument("--discover", action="store_true", help="ещё и поиск Spotlight по всему диску (macOS), разово для старых ревью")
     p.add_argument("--max", type=int, default=40, help="сколько сигналов в порции, остальное – в следующий раз")
     p.set_defaults(fn=cmd_pairs)
     p = sub.add_parser("update", help="обновить Ревизор из репо (git pull) и показать, что поменялось")
@@ -1146,6 +1184,9 @@ def main(argv=None) -> int:
     p.add_argument("--force", action="store_true", help="с --check: спросить репо сейчас, мимо кэша")
     p.set_defaults(fn=cmd_update)
     args = ap.parse_args(argv)
+    if fcntl is None and args.cmd not in ("style",):
+        print("revizor: Windows пока не поддерживается, нужен macOS или Linux (можно WSL).", file=sys.stderr)
+        return 2
     try:
         return args.fn(args)
     except ReviewError as e:

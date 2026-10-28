@@ -689,6 +689,26 @@ class LearnTest(unittest.TestCase):
         self.cli("pairs", "--ack")
         self.assertNotIn("/", ledger.read_text(encoding="utf-8").split('"seen"')[1].split("]")[0])
 
+    def test_count_does_not_replace_batch(self):
+        self.cli("pairs")
+        r = revizor.load(self.doc)
+        r["items"].append({"id": "g", "kind": "edit", "scope": "text", "quote": "старое", "replacement": "новое", "state": "applied"})
+        revizor.save(self.doc, r)
+        self.assertEqual(self.cli("pairs", "--count").strip(), "3")
+        self.cli("pairs", "--ack")  # отмечается порция, которую агент видел, без новой правки
+        self.assertEqual([p["before"] for p in json.loads(self.cli("pairs"))["pairs"]], ["старое"])
+
+    def test_spotlight_only_on_discover(self):
+        calls = []
+        revizor.shutil.which = lambda name: "/usr/bin/mdfind"
+        run = revizor.subprocess.run
+        self.addCleanup(setattr, revizor.subprocess, "run", run)
+        revizor.subprocess.run = lambda cmd, **kw: calls.append(cmd) or type("R", (), {"stdout": ""})()
+        revizor.known_sidecars()
+        self.assertEqual(calls, [])
+        revizor.known_sidecars(discover=True)
+        self.assertEqual(calls[0][0], "mdfind")
+
     def test_batch_is_capped(self):
         out = json.loads(self.cli("pairs", "--max", "2"))
         self.assertEqual(len(out["pairs"]) + len(out["dismissed"]) + len(out["confirmed"]), 2)
@@ -778,9 +798,64 @@ class UpdateTest(unittest.TestCase):
         self.assertIsNone(revizor.check_update())
         self.assertEqual(self.calls, 0)
 
+    def test_update_moves_to_latest_tag_not_branch_head(self):
+        if not revizor.shutil.which("git"):
+            self.skipTest("нет git")
+        t = Path(self.tmp.name)
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        git = lambda cwd, *a: revizor.subprocess.run(["git", "-C", str(cwd), *a], check=True, capture_output=True, env=env, text=True).stdout.strip()
+        origin = t / "origin"
+        origin.mkdir()
+        git(origin, "init", "-q", "-b", "main")
+        (origin / "install.sh").write_text("true\n", encoding="utf-8")
+        for v, tag in (("0.0.1", True), ("0.0.2", True), ("0.0.3", False)):
+            (origin / "revizor.py").write_text(f'__version__ = "{v}"\n', encoding="utf-8")
+            (origin / "CHANGELOG.md").write_text(f"## [{v}] – 2026-01-01\n", encoding="utf-8")
+            git(origin, "add", "-A")
+            git(origin, "commit", "-q", "-m", v)
+            if tag:
+                git(origin, "tag", f"v{v}")
+        clone = t / "clone"
+        revizor.subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+        git(clone, "reset", "-q", "--hard", "v0.0.1")
+        saved = (revizor.ROOT, revizor.__version__)
+        self.addCleanup(lambda: (setattr(revizor, "ROOT", saved[0]), setattr(revizor, "__version__", saved[1])))
+        revizor.ROOT, revizor.__version__ = clone, "0.0.1"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            revizor.main(["update"])
+        self.assertIn("0.0.1 → 0.0.2", out.getvalue())
+        self.assertEqual(git(clone, "rev-parse", "HEAD"), git(origin, "rev-parse", "v0.0.2^{commit}"))
+
     def test_parse_version(self):
         self.assertEqual(revizor.parse_version("v0.3.1"), (0, 3, 1))
         self.assertIsNone(revizor.parse_version("latest"))
+
+
+class BrowserTest(unittest.TestCase):
+    def setUp(self):
+        self.saved = (revizor.sys.platform, revizor.subprocess.run, revizor.webbrowser.open)
+        self.calls = []
+        revizor.webbrowser.open = lambda url: self.calls.append(("default", url)) or True
+
+    def tearDown(self):
+        revizor.sys.platform, revizor.subprocess.run, revizor.webbrowser.open = self.saved
+
+    def test_linux_uses_default_browser(self):
+        revizor.sys.platform = "linux"
+        revizor.subprocess.run = lambda *a, **kw: self.fail("на Linux open -a не вызывается")
+        revizor.open_browser("http://127.0.0.1:1/")
+        self.assertEqual(self.calls, [("default", "http://127.0.0.1:1/")])
+
+    def test_mac_without_chrome_falls_back(self):
+        revizor.sys.platform = "darwin"
+        revizor.subprocess.run = lambda cmd, **kw: type("R", (), {"returncode": 1})()
+        revizor.open_browser("http://127.0.0.1:1/")
+        self.assertEqual(len(self.calls), 1)
+
+    def test_missing_doc_exits(self):
+        with self.assertRaises(SystemExit):
+            revizor.main(["wait", "/нет/такого.md"])
 
 
 class ReleaseHygieneTest(unittest.TestCase):
@@ -810,14 +885,14 @@ class ReopenTest(unittest.TestCase):
         t = Path(self.tmp.name).resolve()
         self.doc = t / "report.md"
         self.doc.write_text("# Итоги\n", encoding="utf-8")
-        self.saved = (revizor.CACHE, revizor.REGISTRY, revizor.REOPEN_WAIT, revizor.check_update, revizor.subprocess.run)
+        self.saved = (revizor.CACHE, revizor.REGISTRY, revizor.REOPEN_WAIT, revizor.check_update, revizor.open_browser)
         revizor.CACHE, revizor.REGISTRY, revizor.REOPEN_WAIT = t / "cache", t / "cache" / "docs.json", 1
         revizor.check_update = lambda: None
         self.opened = []
-        revizor.subprocess.run = lambda cmd, **kw: self.opened.append(cmd)
+        revizor.open_browser = self.opened.append
 
     def tearDown(self):
-        revizor.CACHE, revizor.REGISTRY, revizor.REOPEN_WAIT, revizor.check_update, revizor.subprocess.run = self.saved
+        revizor.CACHE, revizor.REGISTRY, revizor.REOPEN_WAIT, revizor.check_update, revizor.open_browser = self.saved
         self.tmp.cleanup()
 
     def run_open(self, tab=False):

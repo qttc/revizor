@@ -53,7 +53,7 @@ git clone https://github.com/qttc/revizor.git
 revizor/install.sh
 ```
 
-Нужны Python 3.9+, Chrome и Claude Code, остальное лежит в репо. `install.sh` подключает скилл `/revizor`.
+Нужны macOS или Linux, Python 3.9+, Chrome и Claude Code, остальное лежит в репо. `install.sh` подключает скилл `/revizor`.
 
 Или вставь в Claude Code этот промпт, в приложении или в терминале, и Claude поставит всё сам:
 
