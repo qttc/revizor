@@ -20,6 +20,8 @@
     "Клиентская копия": "Client copy", "Другое": "Other", "Авто · {f}": "Auto · {f}",
     "Формат подбирает правила стиля для правок": "The format picks the style rules for edits",
     "Ревизор – правки к документу": "Revizor – document edits", "Ревизор. Стоп нейрослоп": "Revizor. Stop AI slop",
+    // логотип: в английском без еры – дореформенная орфография работает только по-русски
+    "Ревизор": "Revizor", "Ревизоръ": "Revizor", "нейрослоп": "AI slop", "– стоп": "– stop",
     "Свернуть панель": "Collapse panel", "Формат текста. Попадает в стилевые пары вместе с правками": "Text format. Saved to style pairs along with the edits",
     "Формат текста": "Text format",
     "Каждая правка уходит агенту своей кнопкой и применяется сразу, документ обновляется на месте":
@@ -664,6 +666,7 @@ header { padding: 44px 18px 0; display: grid; grid-template-columns: 1fr; }
 .rule.low { transform: scaleY(-1); }
 h1 { margin: 10px 0 6px; font: 900 32px/1 "${FONT}", "Playfair Display", Georgia, serif; letter-spacing: .06em; text-transform: uppercase; }
 .yer { position: relative; display: inline-block; }
+.p:lang(en) .yer { display: none; }
 .yer svg { position: absolute; left: -4px; top: -2px; width: calc(100% + 8px); height: calc(100% + 4px); overflow: visible; pointer-events: none; }
 .bill .sub { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 10px; font: italic 400 14px/1 "${FONT}", "Playfair Display", Georgia, serif; color: var(--muted); }
 .struck { position: relative; display: inline-block; }
@@ -905,8 +908,8 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     <header>
       <div class="bill draw" aria-label="Ревизор. Стоп нейрослоп" data-ta>
         <div class="rule"></div>
-        <h1 aria-hidden="true">Ревизор<span class="yer">ъ<svg viewBox="0 0 30 40" preserveAspectRatio="none"><path class="pen" d="M4 33 C 11 24, 20 14, 27 5" stroke-width="1.6"/></svg></span></h1>
-        <div class="sub" aria-hidden="true"><span class="struck">нейрослоп<svg viewBox="0 0 100 14" preserveAspectRatio="none"><path class="pen" d="M1 8.5 C 20 6.5, 40 8.2, 60 6.8 S 88 6.2, 99 7.4" stroke-width="2.2"/></svg></span><span class="note">— стоп</span></div>
+        <h1 aria-hidden="true"><span data-t>Ревизор</span><span class="yer">ъ<svg viewBox="0 0 30 40" preserveAspectRatio="none"><path class="pen" d="M4 33 C 11 24, 20 14, 27 5" stroke-width="1.6"/></svg></span></h1>
+        <div class="sub" aria-hidden="true"><span class="struck"><span data-t>нейрослоп</span><svg viewBox="0 0 100 14" preserveAspectRatio="none"><path class="pen" d="M1 8.5 C 20 6.5, 40 8.2, 60 6.8 S 88 6.2, 99 7.4" stroke-width="2.2"/></svg></span><span class="note" data-t>– стоп</span></div>
         <div class="rule low"></div>
       </div>
       <button class="icon-btn" id="min" title="Свернуть панель" aria-label="Свернуть панель" data-tt data-ta>${icon("collapse", 18)}</button>
@@ -941,7 +944,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       </div>
     </footer>
   </section>
-  <button id="pill" class="glass" hidden aria-label="Открыть панель правок" data-ta><span class="t">Ревизоръ</span><span class="n" id="pill-n">0</span></button>
+  <button id="pill" class="glass" hidden aria-label="Открыть панель правок" data-ta><span class="t" data-t>Ревизоръ</span><span class="n" id="pill-n">0</span></button>
   <div id="view" class="glass" role="radiogroup" aria-label="Вид документа" data-ta hidden>
     <button data-v="md" role="radio" aria-checked="false" data-t>Оформление</button><button data-v="plain" role="radio" aria-checked="false" data-t>Текст</button>
   </div>
