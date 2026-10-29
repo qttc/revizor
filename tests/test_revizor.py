@@ -79,7 +79,7 @@ class ServerTest(unittest.TestCase):
 
     def test_overlay_has_english_dictionary(self):
         js = urllib.request.urlopen(self.base + "/_revizor/overlay.js").read().decode()
-        for s in ("const EN = {", '"Отправить агенту": "Send to agent"', '"Нейрослоп": "AI slop"', "state.ui_lang", "title_en", "why_en"):
+        for s in ("const EN = {", '"Отправить агенту": "Send to agent"', '"нейрослоп": "AI slop"', '"Ревизоръ": "Revizor"', '"Нейрослоп": "AI slop"', "state.ui_lang", "title_en", "why_en"):
             self.assertIn(s, js)
         # строка, которую разбирает агент, остаётся русской в любом языке панели
         self.assertIn('it.comment = "Переписать без нейрослопа: "', js)
