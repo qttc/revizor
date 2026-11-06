@@ -2037,10 +2037,18 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     for (const e of b.querySelectorAll("*")) {
       const r = e.getBoundingClientRect();
       if (r.width <= avail || r.left >= avail || r.right <= 0) continue;
-      if (e.closest("template") || getComputedStyle(e).position === "fixed") continue;
+      if (e.closest("template") || getComputedStyle(e).position === "fixed" || inScroller(e, b)) continue;
       lo = Math.min(lo, r.left); hi = Math.max(hi, r.right);
     }
     return hi - lo;
+  }
+  // Широкая таблица в обёртке с overflow-x: auto прокручивается сама, страницу из-за неё ужимать не нужно.
+  function inScroller(e, b) {
+    for (let p = e.parentElement; p && p !== b; p = p.parentElement) {
+      const ox = getComputedStyle(p).overflowX;
+      if (ox === "auto" || ox === "scroll") return true;
+    }
+    return false;
   }
   let fitTimer = null;
   const refit = () => { clearTimeout(fitTimer); fitTimer = setTimeout(() => { syncPanelAttr(); fit(); placeSheet(); }, 100); };
