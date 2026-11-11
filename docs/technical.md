@@ -13,7 +13,7 @@ python3 revizor.py style [init [--name N] [--force]]     # какой скилл
 python3 revizor.py pairs [--count] [--ack] [--dir D]     # новые пары для обучения скилла стиля (JSON); --ack – порция разобрана
 python3 revizor.py notes [--count] [--ack] [--dir D]     # разобранные комментарии для плейбука документов (JSON); --ack – порция разобрана
 python3 revizor.py show FILE [--json]                     # правки, которые ждут агента
-python3 revizor.py mark FILE ID... --state applied|rejected [--note TEXT]
+python3 revizor.py mark FILE ID... --state applied|rejected [--note TEXT | --notes JSON]
 python3 revizor.py --version
 ```
 

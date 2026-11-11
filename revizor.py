@@ -4,7 +4,8 @@
     revizor.py open FILE [--port N] [--no-browser]   сервер до «Завершить ревью», потом сводка в stdout
                                                     FILE – .md/.markdown/.txt или .html/.htm
     revizor.py show FILE [--json]                     правки, которые ждут агента
-    revizor.py mark FILE ID... --state applied|rejected [--note TEXT]
+    revizor.py mark FILE ID... --state applied|rejected [--note TEXT | --notes JSON]
+                                                    комментарию и отклонённой правке пометка обязательна
     revizor.py wait FILE                              ждать работу из редактора: правки Live Edit и проверку на нейрослоп
     revizor.py suggest FILE FINDINGS.json            записать находки смысловой проверки на нейрослоп
     revizor.py update [--check [--force]]            обновиться из репо (git pull) и показать, что поменялось
@@ -41,7 +42,7 @@ try:
 except ImportError:  # Windows: блокировки файла правок на fcntl, без них два процесса потеряют правки
     fcntl = None
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -302,7 +303,8 @@ def summary(doc: Path, review: dict, items=None, head=None) -> str:
             out.append(f"  приём: {i['rule']} – найден проверкой на нейрослоп")
     if items:
         out.append("")
-        out.append(f"После применения: revizor.py mark {doc} ID... --state applied (или rejected --note ...)")
+        out.append(f"После применения: revizor.py mark {doc} ID... --state applied (или rejected). "
+                   "Комментарию и отклонённой правке – пометка: --notes '{\"ID\": \"что сделано или почему нет\"}'")
     return "\n".join(out)
 
 
@@ -1074,19 +1076,40 @@ def cmd_show(args) -> int:
     return 0
 
 
+def parse_notes(raw):
+    """--notes: JSON {id: пометка} строкой, путём к файлу или «-» для stdin."""
+    if not raw:
+        return {}
+    try:
+        text = sys.stdin.read() if raw == "-" else raw if raw.lstrip().startswith("{") else Path(raw).read_text(encoding="utf-8")
+        notes = json.loads(text)
+    except (OSError, ValueError) as e:
+        sys.exit(f"--notes: нужен JSON {{\"ID\": \"пометка\"}}: {e}")
+    if not isinstance(notes, dict):
+        sys.exit("--notes: нужен объект {\"ID\": \"пометка\"}")
+    return {str(k): str(v).strip() for k, v in notes.items() if str(v).strip()}
+
+
 def cmd_mark(args) -> int:
     doc = resolve_doc(args)
+    notes = parse_notes(args.notes)
     with locked(doc):
         review = load(doc)
         known = {i["id"]: i for i in review["items"]}
         missing = [i for i in args.ids if i not in known]
         if missing:
             sys.exit(f"нет правок с id: {', '.join(missing)}")
+        # пометка – вход обучения плейбука документов (`notes`): без неё не видно, что сделано по комментарию
+        bare = [i for i in args.ids if not (notes.get(i) or args.note)
+                and (known[i].get("kind") == "comment" or args.state == "rejected")]
+        if bare:
+            sys.exit(f"нужна пометка, что сделано или почему отклонено: {', '.join(bare)}. "
+                     f"--notes '{{\"{bare[0]}\": \"...\"}}' – своя на каждый id, --note – одна на все")
         for i in args.ids:
             known[i]["state"] = args.state
             known[i]["resolved"] = now()
-            if args.note:
-                known[i]["note"] = args.note
+            if notes.get(i) or args.note:
+                known[i]["note"] = notes.get(i) or args.note
         save(doc, review)
     print(f"{len(args.ids)} → {args.state}. Ждут агента: {len(pending(review))}")
     return 0
@@ -1225,7 +1248,8 @@ def main(argv=None) -> int:
     p.add_argument("file")
     p.add_argument("ids", nargs="+")
     p.add_argument("--state", choices=["applied", "rejected"], required=True)
-    p.add_argument("--note")
+    p.add_argument("--note", help="одна пометка на все id")
+    p.add_argument("--notes", help='пометки по id: JSON {"ID": "что сделано"}, файл или «-» (stdin)')
     p.set_defaults(fn=cmd_mark)
     p = sub.add_parser("wait", help="Live Edit: ждать правку, отправленную из редактора, и вывести её")
     p.add_argument("file")

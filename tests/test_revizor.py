@@ -422,6 +422,24 @@ class CliTest(unittest.TestCase):
         self.assertEqual(items["b"]["note"], "уже коротко")
         self.assertIn("0 ждут агента", self.run_cli("show", str(self.doc)))
 
+    def test_mark_comment_needs_note(self):
+        with self.assertRaises(SystemExit):
+            self.run_cli("mark", str(self.doc), "b", "--state", "applied")
+        with self.assertRaises(SystemExit):
+            self.run_cli("mark", str(self.doc), "a", "--state", "rejected")
+        self.assertEqual(len(revizor.pending(revizor.load(self.doc))), 2)
+        self.run_cli("mark", str(self.doc), "a", "b", "--state", "applied",
+                     "--notes", json.dumps({"b": "сократил вступление и выводы"}))
+        items = {i["id"]: i for i in revizor.load(self.doc)["items"]}
+        self.assertEqual(items["b"]["note"], "сократил вступление и выводы")
+        self.assertNotIn("note", items["a"])
+
+    def test_mark_notes_from_file(self):
+        f = Path(self.tmp.name) / "notes.json"
+        f.write_text(json.dumps({"b": "уже коротко"}), encoding="utf-8")
+        self.run_cli("mark", str(self.doc), "b", "--state", "rejected", "--notes", str(f))
+        self.assertEqual({i["id"]: i for i in revizor.load(self.doc)["items"]}["b"]["note"], "уже коротко")
+
     def test_mark_unknown_id_fails(self):
         with self.assertRaises(SystemExit):
             self.run_cli("mark", str(self.doc), "zzz", "--state", "applied")
