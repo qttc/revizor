@@ -41,7 +41,7 @@ try:
 except ImportError:  # Windows: блокировки файла правок на fcntl, без них два процесса потеряют правки
     fcntl = None
 
-__version__ = "1.0.2"
+__version__ = "1.1.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -58,6 +58,7 @@ TEMPLATE = ROOT / "templates" / "style-skill"
 CACHE = Path.home() / ".cache" / "revizor"
 REGISTRY = CACHE / "docs.json"      # какие документы открывались в Ревизоре – отсюда берутся пары для обучения
 BATCH = CACHE / "pairs-batch.json"  # последняя выданная агенту порция пар, `pairs --ack` переносит её в журнал скилла
+NOTES_BATCH = CACHE / "notes-batch.json"  # то же для комментариев: `notes --ack` переносит порцию в журнал плейбука документов
 SKILLS_DIR = Path.home() / ".claude" / "skills"
 CONFIG = Path.home() / ".config" / "revizor" / "config.json"
 
@@ -506,7 +507,8 @@ def skill_files(skill: dict, lang: str = "ru") -> dict:
         [p for p in sorted(d.glob("references/*tells*.md")) if not re.search(r"tells-[a-z]{2}(?![a-z])", p.name)]
     roles = {"examples": "references/examples.md",
              "catalog": str(tells[0].relative_to(d)) if tells else f"references/ai-tells-{lang}.md",
-             "voice": "references/voice.md", "rules": "revizor-rules.json", "ledger": "revizor-learned.json"}
+             "voice": "references/voice.md", "rules": "revizor-rules.json", "ledger": "revizor-learned.json",
+             "documents": "references/documents.md", "notes_ledger": "revizor-notes.json"}
     for k, v in manifest.items():
         v = v.get(lang) if isinstance(v, dict) else v
         if isinstance(v, str):
@@ -823,6 +825,69 @@ def collect_pairs(ledger: dict, extra=(), discover=False) -> dict:
                 dismissed.append({"key": key, "doc": review.get("doc"), "rule": d.get("rule"), "quote": d.get("quote"), "before": d.get("prefix"),
                                   "lang": text_lang(f"{d.get('prefix', '')}{d.get('quote', '')}")})
     return {"pairs": pairs, "dismissed": dismissed, "confirmed": confirmed}
+
+
+def collect_notes(seen: set, extra=(), discover=False) -> list:
+    """Комментарии владельца, которые агент уже разобрал (applied или rejected): к фрагменту, блоку и всему документу.
+    Из них растёт плейбук документов – как строить документ целиком. Ждущие агента не берутся: по ним ещё нет итога."""
+    notes = []
+    for f in known_sidecars(extra, discover):
+        try:
+            review = json.loads(Path(f).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for i in review.get("items", []):
+            key = sha(f"{f}#n:{i.get('id')}")
+            if key in seen or i.get("kind") != "comment" or i.get("state") not in ("applied", "rejected"):
+                continue
+            if not (i.get("comment") or "").strip():
+                continue
+            target = i.get("quote") or i.get("snippet") or i.get("text") or ""
+            notes.append({"key": key, "doc": review.get("doc"), "register": review.get("register"), "scope": i.get("scope", "text"),
+                          "where": i.get("where") or i.get("frame") or "", "target": re.sub(r"\s+", " ", target).strip()[:300],
+                          "comment": i["comment"].strip(), "state": i["state"], "note": i.get("note") or "",
+                          "lang": text_lang(f"{target} {i['comment']}")})
+    return notes
+
+
+def cmd_notes(args) -> int:
+    """Порция комментариев для плейбука документов. Плейбук живёт в скилле стиля (references/documents.md), журнал разобранного
+    – рядом (revizor-notes.json). Скилла нет – создаётся из шаблона, как для пар."""
+    if not learn_allowed():
+        if args.count:
+            print(0)
+        print(f"Обучение запускается из {config().get('learn_from')} (learn_from в {CONFIG}). Комментарии копятся, их заберёт обучение оттуда.",
+              file=sys.stderr)
+        return 0 if args.count else 3
+    skill, created = lang_skill()
+    files = skill_files(skill)
+    ledger_path = Path(files["notes_ledger"])
+    ledger = read_ledger(ledger_path)
+    if args.ack:
+        if not NOTES_BATCH.is_file():
+            print("Нечего отмечать: порции нет. Сначала revizor.py notes.")
+            return 1
+        batch = json.loads(NOTES_BATCH.read_text(encoding="utf-8"))
+        ledger["seen"] = sorted(set(ledger.get("seen", [])) | {n["key"] for n in batch})
+        ledger["updated"] = now()
+        atomic_write(ledger_path, json.dumps(ledger, ensure_ascii=False, indent=1) + "\n")
+        NOTES_BATCH.unlink()
+        print(f"В журнал плейбука документов {skill['name']}: {len(batch)} комментариев.")
+        return 0
+    notes = collect_notes(set(ledger.get("seen", [])), args.dir or (), args.discover)
+    if args.count:  # только число: порцию не трогает
+        print(len(notes))
+        return 0
+    notes = notes[:args.max]
+    atomic_write(NOTES_BATCH, json.dumps(notes, ensure_ascii=False))
+    docs = {}
+    for n in notes:  # по документам: правило видно, когда комментарии одного документа стоят рядом
+        docs.setdefault((n["doc"], n["register"]), []).append({k: v for k, v in n.items() if k not in ("doc", "register")})
+    out = {"skill": skill, "created": created, "files": {k: files[k] for k in ("documents", "notes_ledger")},
+           "playbook": str(ROOT / "skill" / "learn-docs.md"), "total": len(notes),
+           "docs": [{"doc": d, "register": r, "notes": ns} for (d, r), ns in docs.items()]}
+    print(json.dumps(out, ensure_ascii=False, indent=1))
+    return 0
 
 
 def learn_allowed() -> bool:
@@ -1182,6 +1247,13 @@ def main(argv=None) -> int:
     p.add_argument("--discover", action="store_true", help="ещё и поиск Spotlight по всему диску (macOS), разово для старых ревью")
     p.add_argument("--max", type=int, default=40, help="сколько сигналов в порции, остальное – в следующий раз")
     p.set_defaults(fn=cmd_pairs)
+    p = sub.add_parser("notes", help="разобранные комментарии владельца для обучения плейбука документов (JSON)")
+    p.add_argument("--ack", action="store_true", help="отметить последнюю порцию разобранной")
+    p.add_argument("--count", action="store_true", help="только число новых комментариев")
+    p.add_argument("--dir", action="append", help="искать файлы правок ещё и здесь")
+    p.add_argument("--discover", action="store_true", help="ещё и поиск Spotlight по всему диску (macOS), разово для старых ревью")
+    p.add_argument("--max", type=int, default=80, help="сколько комментариев в порции, остальное – в следующий раз")
+    p.set_defaults(fn=cmd_notes)
     p = sub.add_parser("update", help="обновить Ревизор из репо (git pull) и показать, что поменялось")
     p.add_argument("--check", action="store_true", help="только проверить, есть ли новая версия (кэш на сутки)")
     p.add_argument("--force", action="store_true", help="с --check: спросить репо сейчас, мимо кэша")

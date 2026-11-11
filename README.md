@@ -42,6 +42,10 @@ Every "before → after" edit teaches the skill the agent writes with. An edit t
 
 Learning runs after a review once 5 new edits have piled up. If you don't have a style skill, Revizor creates one in `~/.claude/skills/writing-style`. Product names and numbers from your documents stay out of the skill; only the shape of the edit goes in.
 
+## Learns how you build documents
+
+Comments on a passage, a block or the whole document pile up in a documents playbook next to the style skill. "Conclusions come too early", "every chart needs a one-line takeaway", "no jargon here" – once you keep writing the same thing on different documents, it becomes a rule, and the agent builds the next document by it. Learning runs after a review once 5 resolved comments have piled up.
+
 ## Supported formats
 
 - HTML: reports, decks, slides in iframes, self-unpacking exports.

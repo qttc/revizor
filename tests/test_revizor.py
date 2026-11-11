@@ -856,6 +856,57 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class NotesTest(LearnTest.__base__):
+    """Комментарии владельца для плейбука документов: только разобранные, свой журнал, по документам."""
+
+    setUp, tearDown, cli = LearnTest.setUp, LearnTest.tearDown, LearnTest.cli
+
+    def add(self, *items):
+        r = revizor.load(self.doc)
+        r["items"] += list(items)
+        revizor.save(self.doc, r)
+
+    def test_notes_take_resolved_comments_only(self):
+        self.add({"id": "n1", "kind": "comment", "scope": "block", "snippet": "график: Выручка", "where": "Цифры",
+                  "comment": "под графиком нужен вывод", "state": "applied"},
+                 {"id": "n2", "kind": "comment", "scope": "text", "quote": "x", "comment": "ждёт", "state": "pending"},
+                 {"id": "n3", "kind": "comment", "scope": "text", "quote": "y", "comment": "мимо", "state": "rejected", "note": "не по делу"},
+                 {"id": "n4", "kind": "comment", "scope": "text", "quote": "z", "comment": "  ", "state": "applied"})
+        out = json.loads(self.cli("notes"))
+        self.assertEqual(len(out["docs"]), 1)
+        self.assertEqual(out["docs"][0]["register"], "report")
+        notes = {n["comment"]: n for n in out["docs"][0]["notes"]}
+        self.assertEqual(set(notes), {"короче", "под графиком нужен вывод", "мимо"})  # правки, ждущие и пустые не идут
+        self.assertEqual(notes["под графиком нужен вывод"]["target"], "график: Выручка")
+        self.assertEqual(notes["под графиком нужен вывод"]["where"], "Цифры")
+        self.assertEqual(notes["мимо"]["note"], "не по делу")
+        self.assertTrue(out["files"]["documents"].endswith("references/documents.md"))
+        self.assertTrue(out["playbook"].endswith("skill/learn-docs.md"))
+
+    def test_notes_ack_uses_own_ledger(self):
+        self.assertEqual(self.cli("notes", "--count").strip(), "1")
+        self.cli("notes")
+        self.assertIn("1 комментариев", self.cli("notes", "--ack"))
+        self.assertEqual(self.cli("notes", "--count").strip(), "0")
+        out = json.loads(self.cli("pairs"))
+        self.assertEqual([p["before"] for p in out["pairs"]], ["Локальная страница"])  # журнал пар не тронут
+        self.assertTrue(Path(out["files"]["notes_ledger"]).is_file())
+
+    def test_notes_count_does_not_replace_batch(self):
+        self.cli("notes")
+        self.add({"id": "n5", "kind": "comment", "scope": "doc", "comment": "разведи на две главы", "state": "applied"})
+        self.assertEqual(self.cli("notes", "--count").strip(), "2")
+        self.cli("notes", "--ack")
+        self.assertEqual([n["comment"] for d in json.loads(self.cli("notes"))["docs"] for n in d["notes"]], ["разведи на две главы"])
+
+    def test_notes_respect_learn_from(self):
+        revizor.CONFIG.write_text(json.dumps({"learn_from": str(self.doc.parent)}), encoding="utf-8")
+        cwd = os.getcwd()
+        self.addCleanup(os.chdir, cwd)
+        os.chdir(self.tmp.name)
+        self.assertEqual(self.cli("notes", "--count").strip(), "0")
+
+
 class UpdateTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
