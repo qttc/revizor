@@ -12,6 +12,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        exclude:
+          - os: ubuntu-latest
+            python: "3.9"
+        include:
+          # на ubuntu-latest (26.04) сборки Python 3.9 нет, нижняя версия проверяется на 24.04
+          - os: ubuntu-24.04
+            python: "3.9"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
