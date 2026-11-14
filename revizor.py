@@ -44,7 +44,7 @@ try:
 except ImportError:  # Windows: блокировки файла правок на fcntl, без них два процесса потеряют правки
     fcntl = None
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -1213,6 +1213,16 @@ def visible_text(doc: Path) -> str:
     return p.text()
 
 
+def repeated_sentences(text: str, min_len: int = 40) -> list:
+    """Предложения, которые стоят в тексте дважды и больше: строка про одно и то же кочует по разделам."""
+    seen = {}
+    for s in re.split(r"(?<=[.!?])\s+|\n+", text):
+        s = " ".join(s.split())
+        if len(s) >= min_len:
+            seen[s] = seen.get(s, 0) + 1
+    return [(s, n) for s, n in seen.items() if n > 1]
+
+
 def cmd_check(args) -> int:
     """Самопроверка до показа: тот же смысловой проход, что страница просит при открытии, только агент правит
     исходник сам, и владелец получает документ уже без этих примет. Сервер и браузер не нужны."""
@@ -1233,6 +1243,11 @@ def cmd_check(args) -> int:
         "Найти приметы по разделу «Самопроверка до показа» скилла revizor и исправить их в исходнике документа. "
         "Пересобрать экспорт, если он есть, и только потом открывать редактор.",
     ]))
+    dups = repeated_sentences(text)
+    if dups:
+        print("Повторы предложений – оставить там, где отвечают на вопрос раздела:")
+        for s, n in dups[:10]:
+            print(f"  ×{n} {s[:120]}")
     return 0
 
 

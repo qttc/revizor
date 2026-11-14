@@ -454,6 +454,12 @@ class CliTest(unittest.TestCase):
         text = path.read_text(encoding="utf-8")
         self.assertEqual(text, "Итоги\nВыручка выросла на 5%.\nВторой абзац.")
         self.assertIn("Каталог примет:", out)
+        self.assertNotIn("Повторы предложений", out)
+
+    def test_repeated_sentences(self):
+        line = "Город, часовой пояс и график работы указаны в анкете."
+        dups = revizor.repeated_sentences(f"Опыт 4 года. {line}\nЗарплата от 100. {line} Короткое. Короткое.")
+        self.assertEqual(dups, [(line, 2)])
 
     def test_mark_unknown_id_fails(self):
         with self.assertRaises(SystemExit):
