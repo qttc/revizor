@@ -440,6 +440,21 @@ class CliTest(unittest.TestCase):
         self.run_cli("mark", str(self.doc), "b", "--state", "rejected", "--notes", str(f))
         self.assertEqual({i["id"]: i for i in revizor.load(self.doc)["items"]}["b"]["note"], "уже коротко")
 
+    def test_check_prints_visible_text_without_css(self):
+        d = Path(self.tmp.name)
+        page = d / "page.html"
+        page.write_text("<html><style>.a{color:red}</style><script>var x = 1</script>"
+                        "<h1>Итоги</h1><p>Выручка выросла на 5%.</p><p>Второй абзац.</p></html>", encoding="utf-8")
+        saved = revizor.CACHE
+        self.addCleanup(setattr, revizor, "CACHE", saved)
+        revizor.CACHE = d / "cache"
+        out = self.run_cli("check", str(page))
+        self.assertIn("Самопроверка на нейрослоп", out)
+        path = Path(out.split("Видимый текст: ")[1].split(" (")[0])
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(text, "Итоги\nВыручка выросла на 5%.\nВторой абзац.")
+        self.assertIn("Каталог примет:", out)
+
     def test_mark_unknown_id_fails(self):
         with self.assertRaises(SystemExit):
             self.run_cli("mark", str(self.doc), "zzz", "--state", "applied")

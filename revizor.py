@@ -7,6 +7,7 @@
     revizor.py mark FILE ID... --state applied|rejected [--note TEXT | --notes JSON]
                                                     комментарию и отклонённой правке пометка обязательна
     revizor.py wait FILE                              ждать работу из редактора: правки Live Edit и проверку на нейрослоп
+    revizor.py check FILE                            самопроверка на нейрослоп до показа: текст, каталог, что ловят регулярки
     revizor.py suggest FILE FINDINGS.json            записать находки смысловой проверки на нейрослоп
     revizor.py update [--check [--force]]            обновиться из репо (git pull) и показать, что поменялось
     revizor.py style [init]                          какой скилл стиля нашёл Ревизор; init – создать из шаблона
@@ -21,6 +22,7 @@ import shutil
 import contextlib
 import hashlib
 import html
+import html.parser
 import json
 import mimetypes
 import os
@@ -42,7 +44,7 @@ try:
 except ImportError:  # Windows: блокировки файла правок на fcntl, без них два процесса потеряют правки
     fcntl = None
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -1136,13 +1138,8 @@ def take_sent(doc: Path):
         return fresh, review
 
 
-def scan_task(doc: Path, review: dict) -> str:
-    """Задание агенту на смысловую проверку: где текст, по какому каталогу искать, что уже поймали регулярки."""
-    try:
-        roots = json.loads(text_cache(doc).read_text(encoding="utf-8"))["roots"]
-        lang = text_lang(" ".join(r.get("text", "") for r in roots))
-    except (OSError, ValueError, KeyError):
-        lang = doc_lang(doc)
+def catalog_for(lang: str):
+    """Каталог смысловых примет под язык: из скилла стиля владельца, иначе базовый Ревизора."""
     skill = find_style_skill(lang=lang)
     catalog = Path(skill_files(skill, lang)["catalog"]) if skill else None
     if catalog and catalog.is_file():
@@ -1152,6 +1149,17 @@ def scan_task(doc: Path, review: dict) -> str:
         where = " (базовый Ревизора)"
         if not catalog.is_file():
             catalog, where = RULES_DIR / "semantic-ru.md", f" (базовый Ревизора, на русском: каталога на {lang} нет, приметы искать по смыслу)"
+    return skill, catalog, where
+
+
+def scan_task(doc: Path, review: dict) -> str:
+    """Задание агенту на смысловую проверку: где текст, по какому каталогу искать, что уже поймали регулярки."""
+    try:
+        roots = json.loads(text_cache(doc).read_text(encoding="utf-8"))["roots"]
+        lang = text_lang(" ".join(r.get("text", "") for r in roots))
+    except (OSError, ValueError, KeyError):
+        lang = doc_lang(doc)
+    skill, catalog, where = catalog_for(lang)
     base = ", ".join(r["id"] for r in load_rules(skill)["rules"])
     return "\n".join([
         f"Проверка на нейрослоп: {doc}",
@@ -1163,6 +1171,69 @@ def scan_task(doc: Path, review: dict) -> str:
         "Найти смысловые приметы по разделу «Проверка на нейрослоп» скилла revizor, записать: "
         f"revizor.py suggest {doc} <findings.json>, потом снова запустить wait в фоне.",
     ])
+
+
+class _Visible(html.parser.HTMLParser):
+    """Видимый текст HTML без браузера: CSS, JS и шаблоны пропускаются, блоки – с новой строки."""
+    SKIP = {"style", "script", "template", "noscript"}
+    BLOCK = {"p", "div", "section", "article", "header", "footer", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+             "br", "td", "th", "figcaption", "blockquote", "aside", "main", "nav", "dt", "dd"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out, self.skip = [], 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP:
+            self.skip += 1
+        elif tag in self.BLOCK:
+            self.out.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP:
+            self.skip = max(0, self.skip - 1)
+        elif tag in self.BLOCK:
+            self.out.append("\n")
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.out.append(data)
+
+    def text(self) -> str:
+        lines = (" ".join(line.split()) for line in "".join(self.out).split("\n"))
+        return "\n".join(line for line in lines if line)
+
+
+def visible_text(doc: Path) -> str:
+    src = doc.read_text(encoding="utf-8", errors="replace")
+    if kind(doc) != "html":
+        return src
+    p = _Visible()
+    p.feed(src)
+    return p.text()
+
+
+def cmd_check(args) -> int:
+    """Самопроверка до показа: тот же смысловой проход, что страница просит при открытии, только агент правит
+    исходник сам, и владелец получает документ уже без этих примет. Сервер и браузер не нужны."""
+    doc = resolve_doc(args)
+    text = visible_text(doc)
+    out = CACHE / "check" / f"{sha(str(doc))}.txt"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(out, text)
+    lang = text_lang(text)
+    skill, catalog, where = catalog_for(lang)
+    base = ", ".join(r["id"] for r in load_rules(skill)["rules"])
+    print("\n".join([
+        f"Самопроверка на нейрослоп: {doc}",
+        f"Видимый текст: {out} ({len(text)} знаков)" + (" – бандл без текста: проверять исходник дека" if kind(doc) == "html" and len(text) < 200 else ""),
+        f"Язык: {lang}",
+        f"Каталог примет: {catalog}{where}",
+        f"Регулярки ловят сами, не искать: {base}",
+        "Найти приметы по разделу «Самопроверка до показа» скилла revizor и исправить их в исходнике документа. "
+        "Пересобрать экспорт, если он есть, и только потом открывать редактор.",
+    ]))
+    return 0
 
 
 def cmd_suggest(args) -> int:
@@ -1255,6 +1326,9 @@ def main(argv=None) -> int:
     p.add_argument("file")
     p.add_argument("--interval", type=float, default=1.0)
     p.set_defaults(fn=cmd_wait)
+    p = sub.add_parser("check", help="самопроверка на нейрослоп до показа владельцу")
+    p.add_argument("file")
+    p.set_defaults(fn=cmd_check)
     p = sub.add_parser("suggest", help="записать находки смысловой проверки на нейрослоп")
     p.add_argument("file")
     p.add_argument("findings", help="JSON: [{quote, rewrite, rule, title, why, root}] или - для stdin")
