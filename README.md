@@ -22,7 +22,7 @@ Fixing an AI draft through chat is slow. You quote a paragraph, explain where th
    - select a phrase → **Comment** to ask for a change in that spot;
    - **Pick a block** to comment on a paragraph, chart, image or table;
    - **General comment** for the whole document, for example "shorter headings".
-3. Click **Finish review**. The agent applies the edits, tells you what it changed and what it skipped, and reloads the new version in the same tab for a second pass.
+3. Click **Finish round**. The agent applies the edits, tells you what it changed and what it skipped, and reloads the new version in the same tab for another pass. When it is the last pass, open the arrow next to the button and pick **Finish the work**: the agent applies the edits, wraps up in the chat and does not reopen the document.
 
 Edits are saved as you go to `report.review.json` next to the document. If you close the tab before you finish, tell the agent "apply the edits" and it picks them up from that file.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """revizor – локальный редактор правок: человек правит документ в браузере, агент забирает правки.
 
-    revizor.py open FILE [--port N] [--no-browser]   сервер до «Завершить ревью», потом сводка в stdout
+    revizor.py open FILE [--port N] [--no-browser]   сервер до «Завершить раунд» или «Завершить работу», потом сводка
                                                     FILE – .md/.markdown/.txt или .html/.htm
     revizor.py show FILE [--json]                     правки, которые ждут агента
     revizor.py mark FILE ID... --state applied|rejected [--note TEXT | --notes JSON]
@@ -44,7 +44,7 @@ try:
 except ImportError:  # Windows: блокировки файла правок на fcntl, без них два процесса потеряют правки
     fcntl = None
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -749,6 +749,8 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
                     review["view"] = body["view"]  # вид Markdown – порт каждый раз новый, localStorage его не удержит
                 review["doc_sha"] = sha(doc.read_text(encoding="utf-8"))
                 review["status"] = "done" if path == "/api/done" else "open"
+                if path == "/api/done":
+                    review["final"] = body.get("final") is True  # «Завершить работу» – последний круг, иначе раунд
                 save(doc, review)
             self.send_json({"ok": True, "updated": review["updated"], "closed": closed})
             if path == "/api/done":
@@ -1013,6 +1015,13 @@ def resolve_doc(args) -> Path:
     return doc
 
 
+# Агенты путали конец круга с концом работы: первой строкой сводки – что нажал владелец и что делать дальше
+FINISH_ROUND = ("Владелец завершил раунд правок, работа над документом продолжается. Применить правки, отметить mark "
+                "и сразу снова открыть документ (шаги 2 и 3 «Запуска» скилла): вкладка ждёт новую версию.")
+FINISH_WORK = ("Владелец завершил работу с документом: это последний круг. Применить правки, отметить mark, "
+               "редактор больше не открывать. Дальше – обучение (разделы «Обучение» скилла) и итог владельцу.")
+
+
 def cmd_open(args) -> int:
     doc = resolve_doc(args)
     if doc.suffix.lower() not in TEXT_SUFFIXES | HTML_SUFFIXES:
@@ -1028,8 +1037,9 @@ def cmd_open(args) -> int:
         if review["status"] == "done" and pending(review):
             print(f"В {sidecar(doc).name} есть {len(pending(review))} неприменённых правок, они откроются в редакторе.",
                   file=sys.stderr)
-        if review["status"] != "open":
+        if review["status"] != "open" or "final" in review:
             review["status"] = "open"
+            review.pop("final", None)  # документ снова открыт – значит, работа продолжается
             save(doc, review)
 
     update = check_update()
@@ -1044,7 +1054,7 @@ def cmd_open(args) -> int:
     threading.Thread(target=server.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{port}/?v={int(datetime.now().timestamp())}"
     print(f"Редактор: {url}\nПравки: {sidecar(doc)}", file=sys.stderr, flush=True)
-    # После «Завершить ревью» вкладка ждёт сервер на старом порту и сама перезагружается.
+    # После «Завершить раунд» вкладка ждёт сервер на старом порту и сама перезагружается.
     # Вкладку закрыли – через пару секунд тишины открываем новую.
     if reopen and port == prev and tab_seen.wait(REOPEN_WAIT):
         print("Вкладка с прошлого ревью подхватила редактор.", file=sys.stderr, flush=True)
@@ -1060,11 +1070,13 @@ def cmd_open(args) -> int:
             review = load(doc)
             review["status"] = "stopped"  # `wait` в Live Edit видит это и заканчивает цикл
             save(doc, review)
-        print("Остановлено без «Завершить ревью». Правки, что успели сохраниться, в " + str(sidecar(doc)), file=sys.stderr)
+        print("Остановлено без «Завершить раунд». Правки, что успели сохраниться, в " + str(sidecar(doc)), file=sys.stderr)
         return 130
     server.shutdown()
     server.server_close()  # порт свободен сразу: следующий `open` встанет на него
-    print(summary(doc, load(doc)))
+    review = load(doc)
+    print(FINISH_WORK if review.get("final") else FINISH_ROUND)
+    print(summary(doc, review))
     return 0
 
 
@@ -1321,7 +1333,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"revizor {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("open", help="открыть документ в редакторе и ждать «Завершить ревью»")
+    p = sub.add_parser("open", help="открыть документ в редакторе и ждать «Завершить раунд» или «Завершить работу»")
     p.add_argument("file")
     p.add_argument("--port", type=int)
     p.add_argument("--no-browser", action="store_true")

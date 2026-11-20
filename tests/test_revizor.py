@@ -537,7 +537,8 @@ class LiveEditTest(ServerTest.__base__):
 
     def test_overlay_has_live_ui(self):
         js = urllib.request.urlopen(self.base + "/_revizor/overlay.js").read().decode()
-        for s in ("Live Edit", "Отправить агенту", "Агент применяет…", "Завершить ревью", "/api/source"):
+        for s in ("Live Edit", "Отправить агенту", "Агент применяет…", "Завершить раунд", "Завершить работу",
+                  'id="done-menu"', "final: !!final", "/api/source"):
             self.assertIn(s, js)
         self.assertNotIn(">Готово<", js)
 
@@ -1069,7 +1070,7 @@ def listening(port):
 
 
 class ReopenTest(unittest.TestCase):
-    """После «Завершить ревью» агент снова запускает `open`: тот же порт, старая вкладка подхватывает сервер."""
+    """После «Завершить раунд» агент снова запускает `open`: тот же порт, старая вкладка подхватывает сервер."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1086,8 +1087,8 @@ class ReopenTest(unittest.TestCase):
         revizor.CACHE, revizor.REGISTRY, revizor.REOPEN_WAIT, revizor.check_update, revizor.open_browser = self.saved
         self.tmp.cleanup()
 
-    def run_open(self, tab=False):
-        """Один круг `open` до «Завершить ревью». tab – старая вкладка опрашивает сервер."""
+    def run_open(self, tab=False, final=None):
+        """Один круг `open` до завершения. tab – старая вкладка опрашивает сервер, final – «Завершить работу»."""
         prev, opened = revizor.last_port(self.doc), len(self.opened)
         out = io.StringIO()
         th = threading.Thread(target=lambda: revizor.main(["open", str(self.doc)]), daemon=True)
@@ -1101,10 +1102,21 @@ class ReopenTest(unittest.TestCase):
                 urllib.request.urlopen(base + "/api/state", timeout=2).read()
             while time.time() < deadline and not tab and len(self.opened) == opened:
                 time.sleep(0.02)
-            post(base + "/api/done", {"items": []})
+            post(base + "/api/done", {"items": []} if final is None else {"items": [], "final": final})
             th.join(5)
         self.assertFalse(th.is_alive())
+        self.out = out.getvalue()
         return prev, revizor.last_port(self.doc)
+
+    def test_round_and_work_are_told_apart(self):
+        self.run_open()
+        self.assertTrue(self.out.startswith(revizor.FINISH_ROUND))
+        self.assertIs(revizor.load(self.doc)["final"], False)
+        self.run_open(tab=True, final=True)
+        self.assertTrue(self.out.startswith(revizor.FINISH_WORK))
+        self.assertIs(revizor.load(self.doc)["final"], True)
+        self.run_open(tab=True, final="yes")  # снова открыли и прислали не true – это раунд
+        self.assertTrue(self.out.startswith(revizor.FINISH_ROUND))
 
     def test_second_open_reuses_port_and_keeps_tab(self):
         self.run_open()

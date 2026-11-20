@@ -30,7 +30,12 @@
     "Комментарий": "Comment", "Общий комментарий": "General comment", "Комментарий, который касается всего документа": "A comment about the whole document",
     "Выбрать блок": "Pick a block", "Кликни по слайду, графику или таблице на странице": "Click a slide, chart or table on the page",
     "Отменить · Esc": "Cancel · Esc", "Кликни по блоку. Esc – отмена": "Click a block. Esc to cancel",
-    "Правки": "Edits", "Загрузка…": "Loading…", "Повторить": "Retry", "Завершить ревью": "Finish review",
+    "Правки": "Edits", "Загрузка…": "Loading…", "Повторить": "Retry", "Завершить раунд": "Finish round", "Завершить раунд правок": "Finish the round",
+    "Завершить работу": "Finish the work", "Как завершить": "How to finish",
+    "Агент применит правки и откроет новую версию здесь же. Можно на следующий круг.":
+      "The agent applies the edits and opens the new version right here. You can go another round.",
+    "Последний круг: агент применит правки, отчитается в чате и больше не откроет документ.":
+      "The last round: the agent applies the edits, reports in the chat and does not reopen the document.",
     "Отмена": "Cancel", "Отправить": "Send", "Открыть панель правок": "Open the edits panel",
     "Вид документа": "Document view", "Оформление": "Formatted", "Текст": "Text",
     "Действия с выделением": "Selection actions", "Изменить": "Edit", "Отправлено": "Sent", "Вкладку можно закрыть.": "You can close this tab.",
@@ -53,7 +58,8 @@
     "«Выбрать блок» – клик по слайду, графику или таблице.": "“Pick a block” – click a slide, chart or table.",
     "«Общий комментарий» – про документ целиком.": "“General comment” – about the whole document.",
     "Пиши правку и жми «Отправить агенту» – он применит её сразу.": "Write an edit and press “Send to agent”. The agent applies it right away.",
-    "Закончил – жми «Завершить ревью», агент применит правки.": "When you are done, press “Finish review”. The agent applies the edits.",
+    "Закончил круг – жми «Завершить раунд», агент применит правки и откроет новую версию. Последний круг – «Завершить работу» под стрелкой.":
+      "Done with a round? Press “Finish round”: the agent applies the edits and opens the new version. For the last round, pick “Finish the work” under the arrow.",
     "История · {n}": "History · {n}",
     "Блок": "Block", "Правка": "Edit", "Удалить": "Delete", "Удалить правку": "Delete edit", "место не найдено": "spot not found",
     "Как должно быть": "How it should read", "Как правка будет выглядеть": "Edit preview",
@@ -72,8 +78,13 @@
     "Агент закрыл {count}": "The agent closed {count}", "Агент применил правку": "The agent applied the edit",
     "Агент отклонил правку": "The agent rejected the edit", "Не отправилось: сервер остановлен": "Not sent: the server has stopped",
     "{count} ушли агенту. Как применит – новая версия откроется здесь же.": "{count} sent to the agent. When it applies them, the new version opens here.",
-    "Отправить агенту {count} и завершить ревью? Редактор закроется.": "Send {count} to the agent and finish the review? The editor will close.",
-    "Завершить ревью? Редактор закроется.": "Finish the review? The editor will close.",
+    "Отправить агенту {count}? Он применит их и откроет новую версию здесь же.": "Send {count} to the agent? It applies them and opens the new version right here.",
+    "Завершить раунд? Агент откроет документ заново.": "Finish the round? The agent reopens the document.",
+    "Отправить агенту {count} и завершить работу? Новая версия не откроется.": "Send {count} to the agent and finish the work? The document will not reopen.",
+    "Завершить работу? Редактор закроется, новая версия не откроется.": "Finish the work? The editor closes and the document will not reopen.",
+    "{count} ушли агенту. Работа завершена: он применит их и отчитается в чате. Вкладку можно закрыть.":
+      "{count} sent to the agent. The work is finished: it applies them and reports in the chat. You can close this tab.",
+    "Работа завершена. Вкладку можно закрыть.": "The work is finished. You can close this tab.",
     "Сервер не отвечает – перезапусти revizor": "The server is not responding. Restart revizor",
     "Вышла версия <b></b>, у тебя {cur}. Скажи агенту «обнови ревизор».": "Version <b></b> is out, you have {cur}. Tell the agent “update revizor”.",
     "{count} с прошлого раза": "{count} from last time",
@@ -603,6 +614,7 @@
     reject: '<path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/>',
     retry: '<path d="M12.5 8a4.5 4.5 0 1 1-1.3-3.2M12.5 3v2.5H10"/>',
     auto: '<path d="M8 2.5v2M8 11.5v2M2.5 8h2M11.5 8h2M4.2 4.2l1.4 1.4M10.4 10.4l1.4 1.4M4.2 11.8l1.4-1.4M10.4 5.6l1.4-1.4"/>',
+    chevron: '<path d="M4.5 10l3.5-3.5 3.5 3.5"/>',
   };
   const icon = (name, size = 16) =>
     `<svg width="${size}" height="${size}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[name]}</svg>`;
@@ -618,7 +630,7 @@
   --edit: #b07800; --edit-soft: rgba(214, 150, 0, .16); --comment: #2563d9; --comment-soft: rgba(37, 99, 217, .13);
   --doc: #6a5acd; --danger: #c0352b; --ok: #1f8a4c; --ok-soft: rgba(31, 138, 76, .16); --pencil: #c8321f;
   --solid: #17171b; --solid-ink: #fbfbfc; --focus: #2563d9;
-  --menu: rgba(24, 24, 28, .78); --menu-ink: #f7f7f8;
+  --menu: rgba(24, 24, 28, .78); --menu-ink: #f7f7f8; --pop: #fbfbfc;
   --shadow: 0 30px 70px -20px rgba(20, 20, 40, .34), 0 8px 24px -10px rgba(20, 20, 40, .2);
   font: 13.5px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif; color: var(--ink);
   -webkit-font-smoothing: antialiased;
@@ -631,7 +643,7 @@
   --edit: #f0b43a; --edit-soft: rgba(240, 180, 58, .16); --comment: #7aa7ff; --comment-soft: rgba(122, 167, 255, .16);
   --doc: #a99cff; --danger: #ff7a6e; --ok: #5fd08f; --ok-soft: rgba(95, 208, 143, .2); --pencil: #ff6a52;
   --solid: #f3f3f6; --solid-ink: #141417; --focus: #7aa7ff;
-  --menu: rgba(52, 52, 60, .82); --menu-ink: #f7f7f8;
+  --menu: rgba(52, 52, 60, .82); --menu-ink: #f7f7f8; --pop: #26262c;
   --shadow: 0 30px 70px -20px rgba(0, 0, 0, .6), 0 8px 24px -10px rgba(0, 0, 0, .4);
 }
 * { box-sizing: border-box; }
@@ -781,6 +793,19 @@ footer { padding: 10px 16px 14px; }
 .btn.solid { background: var(--solid); color: var(--solid-ink); box-shadow: none; }
 .btn.solid:hover { background: color-mix(in srgb, var(--solid) 88%, var(--comment)); }
 #confirm-text { flex: 1; font-size: 12.5px; color: var(--ink); }
+/* «Завершить раунд» – главная часть, под стрелкой – «Завершить работу» с пояснением */
+.split { position: relative; display: inline-flex; flex: none; }
+.split #done { border-radius: 999px 4px 4px 999px; padding: 0 14px 0 16px; }
+.split #done-more { border-radius: 4px 999px 999px 4px; padding: 0 11px 0 9px; margin-left: 2px; display: inline-flex; align-items: center; }
+.split #done-more svg { transition: transform .15s; }
+.split #done-more[aria-expanded="true"] svg { transform: rotate(180deg); }
+#done-menu { position: absolute; right: 0; bottom: calc(100% + 8px); width: 300px; padding: 6px; border-radius: 14px; z-index: 3;
+  background: var(--pop); box-shadow: var(--shadow), inset 0 0 0 .5px var(--hair); }
+#done-menu[hidden] { display: none; }
+#done-menu .mi { display: block; width: 100%; text-align: left; padding: 9px 10px; border: 0; border-radius: 9px; background: transparent; }
+#done-menu .mi:hover, #done-menu .mi:focus-visible { background: var(--fill-hover); }
+#done-menu .mi b { display: block; font-size: 13px; font-weight: 600; }
+#done-menu .mi span { display: block; margin-top: 2px; font-size: 12px; line-height: 1.4; color: var(--muted); }
 .upd { margin-top: 6px; padding: 7px 10px; border-radius: 10px; font-size: 12px; color: var(--muted); background: var(--fill); box-shadow: inset 0 0 0 .5px var(--hair); }
 .upd[hidden] { display: none; }
 .upd b { color: var(--ink); font-weight: 600; }
@@ -901,7 +926,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
   min-height: 0; field-sizing: content; padding: 2px 10px; }
 .card.working .head .icon-btn { display: none; } /* агент уже правит документ по ней */
 /* в Live Edit главное действие – «Отправить агенту» у карточки, завершение уходит на второй план */
-.p.live #done { background: var(--fill); color: var(--ink); box-shadow: inset 0 0 0 .5px var(--hair); }
+.p.live #done, .p.live #done-more { background: var(--fill); color: var(--ink); box-shadow: inset 0 0 0 .5px var(--hair); }
 </style>
 <div class="p">
   <section id="panel" class="glass" aria-label="Ревизор – правки к документу" data-ta>
@@ -934,7 +959,14 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       <div class="row" id="bottom">
         <span id="status" role="status" aria-live="polite"><span class="led"></span><span id="status-text" data-t>Загрузка…</span></span>
         <button class="btn" id="retry">${icon("retry", 14)} <span data-t>Повторить</span></button>
-        <button class="btn solid" id="done" data-t>Завершить ревью</button>
+        <div class="split">
+          <button class="btn solid" id="done" title="Агент применит правки и откроет новую версию здесь же. Можно на следующий круг." data-tt><span data-t>Завершить раунд</span></button>
+          <button class="btn solid" id="done-more" aria-haspopup="menu" aria-expanded="false" aria-controls="done-menu" aria-label="Как завершить" data-ta>${icon("chevron", 14)}</button>
+          <div id="done-menu" role="menu" hidden>
+            <button class="mi" role="menuitem" id="done-round"><b data-t>Завершить раунд правок</b><span data-t>Агент применит правки и откроет новую версию здесь же. Можно на следующий круг.</span></button>
+            <button class="mi" role="menuitem" id="done-final"><b data-t>Завершить работу</b><span data-t>Последний круг: агент применит правки, отчитается в чате и больше не откроет документ.</span></button>
+          </div>
+        </div>
       </div>
       <div class="upd" id="upd" hidden></div>
       <div class="row" id="confirm" hidden>
@@ -1340,7 +1372,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
         <li>${tr("Выдели текст – появится «Изменить» и «Комментарий».")}</li>
         ${!canBlock() ? "" : `<li>${tr(MODE === "md" ? "«Выбрать блок» – клик по абзацу, таблице или заголовку раздела." : "«Выбрать блок» – клик по слайду, графику или таблице.")}</li>`}
         <li>${tr("«Общий комментарий» – про документ целиком.")}</li></ol>
-        <p>${tr(live ? "Пиши правку и жми «Отправить агенту» – он применит её сразу." : "Закончил – жми «Завершить ревью», агент применит правки.")}</p>`;
+        <p>${tr(live ? "Пиши правку и жми «Отправить агенту» – он применит её сразу." : "Закончил круг – жми «Завершить раунд», агент применит правки и откроет новую версию. Последний круг – «Завершить работу» под стрелкой.")}</p>`;
       box.append(e);
     }
     const hits = slopOn ? allHits() : [];
@@ -1910,24 +1942,27 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
   const count = (n) => (LANG === "en" ? `${n} ${n === 1 ? "edit" : "edits"}` : `${n} ${plural(n)}`);
 
   const keep = (i) => (i.kind === "edit" ? i.replacement !== draft(i.quote) : (i.comment || "").trim());
-  async function done() {
+  // final – «Завершить работу»: последний круг, агент применит правки и документ больше не откроет
+  async function done(final) {
     // Пустые карточки агенту не нужны: правка без изменений, комментарий без текста.
     items = items.filter(keep);
     clearTimeout(saveTimer);
     try {
-      const r = await fetch("/api/done", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload()) });
+      const r = await fetch("/api/done", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload(), final: !!final }) });
       if (!r.ok) throw new Error(r.status);
     } catch (e) {
       setStatus("error", tr("Не отправилось: сервер остановлен"));
       return;
     }
-    $("#cover-text").textContent = tr("{count} ушли агенту. Как применит – новая версия откроется здесь же.", { count: count(items.length) });
+    $("#cover-text").textContent = final
+      ? (items.length ? tr("{count} ушли агенту. Работа завершена: он применит их и отчитается в чате. Вкладку можно закрыть.", { count: count(items.length) }) : tr("Работа завершена. Вкладку можно закрыть."))
+      : tr("{count} ушли агенту. Как применит – новая версия откроется здесь же.", { count: count(items.length) });
     const cv = $("#cover");
     cv.hidden = false;
     anim(cv, { opacity: [0, 1] }, { duration: 0.3 });
     anim(cv.querySelector("h2"), { opacity: [0, 1], y: [14, 0] }, { duration: 0.5, delay: 0.08 });
     clearInterval(pollTimer); pollTimer = null;
-    awaitReopen();
+    if (!final) awaitReopen(); // после «Завершить работу» новой версии не будет
   }
 
   // Агент применил правки и снова запустил `open` – он встаёт на тот же порт. Ждём его и перезагружаемся в новую версию.
@@ -1961,19 +1996,41 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
   };
   $("#retry").onclick = () => { scheduleSave(); };
 
-  // «Завершить ревью» необратимо: сервер закрывается и правки уходят агенту. Поэтому только кликом и с подтверждением, без горячей клавиши.
-  async function askDone(on) {
+  // Завершение необратимо: сервер закрывается и правки уходят агенту. Поэтому только кликом и с подтверждением, без горячей клавиши.
+  // «Завершить раунд» – агент применит и откроет новую версию здесь же. «Завершить работу» – последний круг, документ не откроется.
+  let finalAsk = false;
+  async function askDone(on, final) {
+    showDoneMenu(false);
+    finalAsk = !!final;
     // забранные в Live Edit агент доделает сам, в пачку при завершении они не идут
     const n = items.filter((i) => keep(i) && !i.taken).length;
-    $("#confirm-text").textContent = n ? tr("Отправить агенту {count} и завершить ревью? Редактор закроется.", { count: count(n) }) : tr("Завершить ревью? Редактор закроется.");
+    $("#confirm-text").textContent = finalAsk
+      ? (n ? tr("Отправить агенту {count} и завершить работу? Новая версия не откроется.", { count: count(n) }) : tr("Завершить работу? Редактор закроется, новая версия не откроется."))
+      : (n ? tr("Отправить агенту {count}? Он применит их и откроет новую версию здесь же.", { count: count(n) }) : tr("Завершить раунд? Агент откроет документ заново."));
     const show = on ? $("#confirm") : $("#bottom"), hide = on ? $("#bottom") : $("#confirm");
     hide.hidden = true; show.hidden = false;
     anim(show, { opacity: [0, 1], y: [6, 0] }, { duration: 0.18 });
     (on ? $("#confirm-no") : $("#done")).focus();
   }
-  $("#done").onclick = () => askDone(true);
+  function showDoneMenu(on) {
+    const m = $("#done-menu");
+    if (m.hidden === !on) return;
+    m.hidden = !on;
+    $("#done-more").setAttribute("aria-expanded", String(on));
+    if (on) { anim(m, { opacity: [0, 1], y: [6, 0] }, { duration: 0.16 }); $("#done-round").focus(); }
+  }
+  $("#done").onclick = () => askDone(true, false);
+  $("#done-more").onclick = (e) => { e.stopPropagation(); showDoneMenu($("#done-menu").hidden); };
+  $("#done-round").onclick = () => askDone(true, false);
+  $("#done-final").onclick = () => askDone(true, true);
+  $("#done-menu").addEventListener("keydown", (e) => {
+    const its = [$("#done-round"), $("#done-final")], k = its.indexOf(e.composedPath()[0]);
+    if (e.key === "Escape") { e.preventDefault(); showDoneMenu(false); $("#done-more").focus(); }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); its[(k + (e.key === "ArrowDown" ? 1 : its.length - 1)) % its.length].focus(); }
+  });
+  sh.addEventListener("click", (e) => { if (!e.composedPath().some((n) => n.classList && n.classList.contains("split"))) showDoneMenu(false); });
   $("#confirm-no").onclick = () => askDone(false);
-  $("#confirm-yes").onclick = () => { $("#confirm").hidden = true; $("#bottom").hidden = false; done(); };
+  $("#confirm-yes").onclick = () => { $("#confirm").hidden = true; $("#bottom").hidden = false; done(finalAsk); };
 
   // ---------- панель: сбоку на широком экране, снизу на узком ----------
 
