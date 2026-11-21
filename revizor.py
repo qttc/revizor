@@ -44,7 +44,7 @@ try:
 except ImportError:  # Windows: блокировки файла правок на fcntl, без них два процесса потеряют правки
     fcntl = None
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -220,6 +220,7 @@ LOCKS = CACHE / "locks"
 TEXTS = CACHE / "text"  # текст страницы для смысловой проверки: у бандла и HTML его видит только страница
 REOPEN_WAIT = 4  # с: вкладка опрашивает сервер раз в 1,5 с
 WAIT_GRACE = 10  # с: столько wait ждёт, что завершённое ревью откроют снова
+OWNER_CHECK = 5  # с: как часто open и wait проверяют, жив ли запустивший их процесс
 CTX = 32
 MAX_BODY = 10 * 1024 * 1024  # байт: больше страница не шлёт даже с текстом большого дека
 
@@ -1022,6 +1023,46 @@ FINISH_WORK = ("Владелец завершил работу с докумен
                "редактор больше не открывать. Дальше – обучение (разделы «Обучение» скилла) и итог владельцу.")
 
 
+def owner_chain(depth: int = 2) -> list:
+    """Родитель и дед: у агента это обёртка-shell и сама сессия, в терминале – shell и login."""
+    chain, pid = [], os.getppid()
+    while pid > 1 and len(chain) < depth:
+        chain.append(pid)
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True, timeout=5).stdout
+            pid = int(out.strip() or 1)
+        except (ValueError, OSError, subprocess.SubprocessError):
+            break
+    return chain
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def watch_owner(orphaned: threading.Event, wake=None) -> None:
+    """Сессию агента закрыли – open и wait выходят сами. Иначе сервер и опрос висят сиротами днями.
+    Запущен уже сиротой (nohup, launchd) – не следим: хозяина нет с самого начала."""
+    chain = owner_chain()
+    if not chain:
+        return
+
+    def loop():
+        while not orphaned.is_set():
+            time.sleep(OWNER_CHECK)
+            if os.getppid() == 1 or not all(pid_alive(p) for p in chain):
+                orphaned.set()
+                if wake:
+                    wake.set()
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def cmd_open(args) -> int:
     doc = resolve_doc(args)
     if doc.suffix.lower() not in TEXT_SUFFIXES | HTML_SUFFIXES:
@@ -1061,8 +1102,12 @@ def cmd_open(args) -> int:
     elif not args.no_browser:
         open_browser(url)
 
+    orphaned = threading.Event()
+    watch_owner(orphaned, wake=done)
     try:
         done.wait()
+        if orphaned.is_set():
+            raise KeyboardInterrupt
     except KeyboardInterrupt:
         server.shutdown()
         server.server_close()
@@ -1070,7 +1115,8 @@ def cmd_open(args) -> int:
             review = load(doc)
             review["status"] = "stopped"  # `wait` в Live Edit видит это и заканчивает цикл
             save(doc, review)
-        print("Остановлено без «Завершить раунд». Правки, что успели сохраниться, в " + str(sidecar(doc)), file=sys.stderr)
+        why = "Сессия, запустившая редактор, закрыта: сервер остановлен" if orphaned.is_set() else "Остановлено без «Завершить раунд»"
+        print(f"{why}. Правки, что успели сохраниться, в {sidecar(doc)}", file=sys.stderr)
         return 130
     server.shutdown()
     server.server_close()  # порт свободен сразу: следующий `open` встанет на него
@@ -1309,7 +1355,12 @@ def cmd_wait(args) -> int:
     doc = resolve_doc(args)
     # wait стартует вместе с повторным open: пока open не открыл ревью заново, в файле ещё старый «завершено»
     grace = time.monotonic() + WAIT_GRACE
+    orphaned = threading.Event()
+    watch_owner(orphaned)
     while True:
+        if orphaned.is_set():
+            print(f"Сессия, запустившая wait, закрыта: Live Edit для {doc.name} остановлен.")
+            return 0
         got = take_sent(doc)
         if got is None and time.monotonic() < grace:
             time.sleep(args.interval)
