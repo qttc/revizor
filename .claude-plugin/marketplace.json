@@ -1,0 +1,19 @@
+{
+  "name": "revizor",
+  "owner": {
+    "name": "qttc",
+    "url": "https://github.com/qttc"
+  },
+  "metadata": {
+    "description": "Revizor – a local review editor for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "revizor",
+      "source": "./",
+      "description": "Edit AI-written documents in the browser, and Claude Code applies your edits. Flags AI slop and learns your writing style from the edits you make.",
+      "version": "1.6.0",
+      "category": "productivity"
+    }
+  ]
+}

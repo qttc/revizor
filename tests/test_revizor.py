@@ -990,6 +990,30 @@ class UpdateTest(unittest.TestCase):
         self.assertIsNone(revizor.check_update())
         self.assertEqual(self.calls, 0)
 
+    def test_update_in_plugin_cache_points_to_plugin_commands(self):
+        root = Path(self.tmp.name) / "plugins" / "cache" / "revizor" / "revizor" / "1.6.0"
+        root.mkdir(parents=True)
+        saved = revizor.ROOT
+        self.addCleanup(setattr, revizor, "ROOT", saved)
+        revizor.ROOT = root
+        with self.assertRaises(SystemExit) as e:
+            revizor.main(["update"])
+        self.assertIn("/plugin update revizor@revizor", str(e.exception.code))
+
+    def test_update_refuses_foreign_git_repo(self):
+        if not revizor.shutil.which("git"):
+            self.skipTest("нет git")
+        repo = Path(self.tmp.name) / "dotfiles"
+        root = repo / "tools" / "revizor"
+        root.mkdir(parents=True)
+        revizor.subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        saved = revizor.ROOT
+        self.addCleanup(setattr, revizor, "ROOT", saved)
+        revizor.ROOT = root
+        with self.assertRaises(SystemExit) as e:
+            revizor.main(["update"])
+        self.assertIn("не через git clone", str(e.exception.code))
+
     def test_update_moves_to_latest_tag_not_branch_head(self):
         if not revizor.shutil.which("git"):
             self.skipTest("нет git")
@@ -1051,6 +1075,14 @@ class BrowserTest(unittest.TestCase):
 
 
 class ReleaseHygieneTest(unittest.TestCase):
+    def test_plugin_manifests_match_version(self):
+        for f in ("plugin.json", "marketplace.json"):
+            d = json.loads((revizor.ROOT / ".claude-plugin" / f).read_text(encoding="utf-8"))
+            v = d["version"] if f == "plugin.json" else d["plugins"][0]["version"]
+            self.assertEqual(v, revizor.__version__, f)
+        skill = json.loads((revizor.ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))["skills"][0]
+        self.assertTrue((revizor.ROOT / skill / "SKILL.md").is_file())
+
     def test_version_matches_changelog(self):
         text = (Path(revizor.__file__).parent / "CHANGELOG.md").read_text(encoding="utf-8")
         top = re.search(r"(?m)^## \[(\d+\.\d+\.\d+)\]", text).group(1)

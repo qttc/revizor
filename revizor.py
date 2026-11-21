@@ -44,7 +44,7 @@ try:
 except ImportError:  # Windows: блокировки файла правок на fcntl, без них два процесса потеряют правки
     fcntl = None
 
-__version__ = "1.5.2"
+__version__ = "1.6.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -376,7 +376,13 @@ def cmd_update(args) -> int:
         print(f"Доступна {info['latest']}, у тебя {info['current']}." if info else f"Последняя версия: {__version__}.")
         return 0
     git = lambda *a: subprocess.run(["git", "-C", str(ROOT), *a], capture_output=True, text=True)
-    if git("rev-parse", "--is-inside-work-tree").returncode != 0:
+    # плагином Claude Code обновляет сам Claude Code. Проверка до git: кэш может лежать внутри чужого репо (~/.claude в dotfiles)
+    parts = ROOT.resolve().parts
+    if any(parts[i:i + 2] == ("plugins", "cache") for i in range(len(parts) - 1)):
+        sys.exit("Ревизор стоит плагином Claude Code. Обновление – в Claude Code: "
+                 "/plugin marketplace update revizor, затем /plugin update revizor@revizor")
+    top = git("rev-parse", "--show-toplevel")
+    if top.returncode != 0 or Path(top.stdout.strip()).resolve() != ROOT.resolve():
         sys.exit(f"Ревизор в {ROOT} поставлен не через git clone. Переставь: git clone {REPO_URL}")
     dirty = [l[3:] for l in git("status", "--porcelain").stdout.splitlines() if l.strip()]
     if dirty:

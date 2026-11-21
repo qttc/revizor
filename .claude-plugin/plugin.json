@@ -1,0 +1,25 @@
+{
+  "name": "revizor",
+  "displayName": "Revizor",
+  "version": "1.6.0",
+  "description": "Edit AI-written documents in the browser, and Claude Code applies your edits. Flags AI slop and learns your writing style from the edits you make.",
+  "author": {
+    "name": "qttc",
+    "url": "https://github.com/qttc"
+  },
+  "homepage": "https://github.com/qttc/revizor",
+  "repository": "https://github.com/qttc/revizor",
+  "license": "MIT",
+  "keywords": [
+    "review",
+    "editing",
+    "ai-slop",
+    "writing-style",
+    "markdown",
+    "html",
+    "human-in-the-loop"
+  ],
+  "skills": [
+    "./skill"
+  ]
+}

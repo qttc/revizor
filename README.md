@@ -8,7 +8,9 @@ English · [Русский](README.ru.md)
 
 Revizor is a local review editor for [Claude Code](https://claude.com/claude-code). You open a report, a deck or a Markdown file the agent wrote, rewrite the parts you don't like right on the page, and the agent applies your edits to the source file. It also flags AI slop in the text and learns your writing style from the edits you make.
 
-![Revizor: the document on the left, edits on the right](docs/screenshot-en.png)
+![Revizor in action: AI slop flagged, a rewrite accepted in one click, your own edit, then Claude Code applies everything and the new version opens in the same tab](docs/demo.gif)
+
+The document in the demo is [examples/launch-recap.html](examples/launch-recap.html). To try it, ask Claude Code to open that file in Revizor.
 
 ## Why
 
@@ -56,12 +58,21 @@ Comments on a passage, a block or the whole document pile up in a documents play
 
 You need macOS or Linux, Python 3.9+, Chrome and Claude Code. Nothing else to install.
 
+As a Claude Code plugin, inside Claude Code:
+
+```
+/plugin marketplace add qttc/revizor
+/plugin install revizor@revizor
+```
+
+Or from a clone:
+
 ```
 git clone https://github.com/qttc/revizor.git
 revizor/install.sh
 ```
 
-`install.sh` links the `/revizor` skill into `~/.claude/skills`. Or paste this prompt into Claude Code, in the app or in the terminal, and Claude sets everything up:
+`install.sh` links the `/revizor` skill into `~/.claude/skills`. Use one install method: with both, Claude Code sees two copies of the skill that can be on different versions. Or paste this prompt into Claude Code, in the app or in the terminal, and Claude sets everything up:
 
 ```
 Install Revizor, a review editor for Claude Code: https://github.com/qttc/revizor
