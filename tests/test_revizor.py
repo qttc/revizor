@@ -538,7 +538,7 @@ class LiveEditTest(ServerTest.__base__):
     def test_overlay_has_live_ui(self):
         js = urllib.request.urlopen(self.base + "/_revizor/overlay.js").read().decode()
         for s in ("Live Edit", "Отправить агенту", "Агент применяет…", "Завершить раунд", "Завершить работу",
-                  'id="done-menu"', "final: !!final", "/api/source"):
+                  'id="done-menu"', "final: !!final", "/api/source", 'd.addEventListener("dblclick"'):
             self.assertIn(s, js)
         self.assertNotIn(">Готово<", js)
 

@@ -1851,10 +1851,20 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     }, true);
     d.addEventListener("mouseup", (e) => {
       if (blockMode || (r === main && e.composedPath().includes(host))) return;
+      // Читаем выделение сейчас: к таймеру расширение-переводчик (Reverso) успевало его схлопнуть
+      const now = readSelection(r);
+      if (now) e.stopPropagation(); // выделение – это правка: дальше document событие не идёт, до window его не услышат
       setTimeout(() => {
-        const sel = readSelection(r);
+        const sel = readSelection(r) || now;
         if (sel) { pendingSel = sel; showToolbar(sel); } else if (!pendingSel || pendingSel.r === r) hideToolbar();
       }, 0);
+    });
+    // Переводчики в браузере (Reverso и похожие) слушают dblclick на window: схлопывают выделение, оборачивают слово
+    // своим элементом и закрывают тулбар попапом. Двойной клик по слову или числу – обычный способ выделить его для правки.
+    // Обработчики самой страницы на элементах срабатывают раньше document и не страдают.
+    d.addEventListener("dblclick", (e) => {
+      if (blockMode || (r === main && e.composedPath().includes(host))) return;
+      if (!r.win.getSelection().isCollapsed) e.stopPropagation();
     });
     d.addEventListener("mousedown", (e) => {
       if (!(r === main && e.composedPath().includes(host))) $("#tb").hidden = true;
