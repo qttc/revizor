@@ -18,6 +18,6 @@ python3 -m unittest discover tests
 
 Changes to `web/overlay.js` also need a manual check in Chrome on `tests/fixtures/markdown.md` (both views), a plain text file, an HTML report and a deck with slides in iframes, at 1440 and 390 px wide.
 
-A change in behavior gets a `CHANGELOG.md` entry and the same version in `revizor.py` (`__version__`); a test checks they match. Commits follow [Conventional Commits](https://www.conventionalcommits.org/).
+A change in behavior gets an entry in `CHANGELOG.md` (English) and `CHANGELOG.ru.md` (Russian) under the same version, and the same version in `revizor.py` (`__version__`); a test checks that `CHANGELOG.md` and the code match. Commits follow [Conventional Commits](https://www.conventionalcommits.org/).
 
 Agent-specific rules for working in this repo live in [CLAUDE.md](CLAUDE.md), the architecture in [docs/technical.md](docs/technical.md).
