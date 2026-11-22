@@ -101,6 +101,14 @@ When a new release is out, the agent offers to update the next time you run `/re
 
 Documents and edits stay on your machine. The editor server listens on `127.0.0.1` only and accepts requests from its own tab. Once a day Revizor runs `git ls-remote` against this repo to check for a new release; `REVIZOR_NO_UPDATE_CHECK=1` turns that off. See [SECURITY.md](SECURITY.md).
 
+What Revizor runs and writes:
+
+- `python3 revizor.py`, Python standard library only. It starts a local HTTP server on `127.0.0.1` that serves the document's folder, without hidden files and review files.
+- Chrome, or the default browser on Linux, to open the editor page.
+- `git ls-remote` once a day to check for a release, and `git fetch` with a fast-forward to the latest release tag when you update a clone.
+- Files it writes: `<document>.review.json` next to the document, `~/.cache/revizor/` (ports, open documents, text for the slop check, update check), and your writing skill in `~/.claude/skills/writing-style/` when learning runs. It reads `~/.config/revizor/config.json` if it exists.
+- Nothing is sent anywhere else. Fonts and the Motion library ship in `web/vendor`, so the editor page loads nothing from the network.
+
 ## FAQ
 
 **Does it work without Claude Code?** The editor and the review file work on their own: `python3 revizor.py open report.md` opens the page, and `revizor.py show report.md` prints the edits. Applying edits and the slop check by meaning need an agent that follows `skill/SKILL.md`.
