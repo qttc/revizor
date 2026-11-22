@@ -4,7 +4,7 @@
 [![release](https://img.shields.io/github/v/release/qttc/revizor)](https://github.com/qttc/revizor/releases)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-English · [Русский](README.ru.md) · Site: [revizor.pages.dev](https://revizor.pages.dev)
+English · [Русский](README.ru.md) · Site: [tratseuski.com/revizor](https://tratseuski.com/revizor/)
 
 Revizor is a local review editor for [Claude Code](https://claude.com/claude-code). You open a report, a deck or a Markdown file the agent wrote, rewrite the parts you don't like right on the page, and the agent applies your edits to the source file. It also flags AI slop in the text and learns your writing style from the edits you make.
 

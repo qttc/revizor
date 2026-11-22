@@ -1,6 +1,6 @@
 # Ревизор – правь тексты ИИ прямо в браузере, Claude Code применит правки
 
-[English](README.md) · Русский · Сайт: [revizor.pages.dev](https://revizor.pages.dev)
+[English](README.md) · Русский · Сайт: [tratseuski.com/revizor](https://tratseuski.com/revizor/)
 
 Мини-тула для правки текстов. Открываешь отчёт или дек и переписываешь как тебе нравится. Агент забирает правки и применяет их.
 
