@@ -4,6 +4,13 @@ English · [Русский](CHANGELOG.ru.md)
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [SemVer](https://semver.org/).
 
+## [1.6.2] – 2026-11-22
+
+### Changed
+
+- Bundled libraries updated to their latest versions: Motion 11.11.17 → 14.14.0, mdast-util-from-markdown 2.0.2 → 2.1.0, mdast-util-gfm 3.0.0 → 3.1.0, esbuild for the bundles 0.25.10 → 0.28.2. `npm audit` finds no vulnerabilities in either bundle. Motion is now built from the four functions Revizor and its site use, with `tools/vendor-motion/build.sh`, so the update can be repeated.
+- CI runs on Python 3.14 too, and on the current versions of the checkout and setup-python actions.
+
 ## [1.6.1] – 2026-11-22
 
 ### Changed
