@@ -4,6 +4,12 @@ English · [Русский](CHANGELOG.ru.md)
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [SemVer](https://semver.org/).
 
+## [1.6.1] – 2026-11-22
+
+### Changed
+
+- If the skill can't find `revizor.py`, the agent now says why and gives both install commands, plugin and clone. This happens when the skill folder was installed on its own, for example with `npx skills add`, which copies the folder without `revizor.py`. The README warns about it in Install.
+
 ## [1.6.0] – 2026-11-21
 
 For an agent that updated Revizor mid-chat: the line that calls `revizor.py` in `skill/SKILL.md` has changed. Reread that section before "Launch".

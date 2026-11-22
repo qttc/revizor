@@ -87,6 +87,8 @@ Install Revizor, a review editor for Claude Code: https://github.com/qttc/revizo
 5. Tell me in one line what was installed and how to use it: "/revizor <file>" or "open it in the editor".
 ```
 
+`npx skills add qttc/revizor` copies only the skill folder, without `revizor.py`, so Revizor can't run from it. Use the plugin or a clone.
+
 If `/revizor` doesn't show up in the command list, start a new session: skills load when a session starts.
 
 ## Update and uninstall
