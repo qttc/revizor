@@ -4,6 +4,12 @@ English · [Русский](CHANGELOG.ru.md)
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [SemVer](https://semver.org/).
 
+## [1.6.3] – 2026-11-22
+
+### Fixed
+
+- Selected text in the panel's fields no longer turns invisible. A report with its own selection style, such as white text on a blue highlight, passed that white text into the panel, and on the light panel it disappeared.
+
 ## [1.6.2] – 2026-11-22
 
 ### Changed

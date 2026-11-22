@@ -650,7 +650,8 @@
 button, select, input, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-::selection { background: var(--comment-soft); }
+/* цвет текста задан явно: иначе Chrome наследует ::selection документа, и белый текст выделения отчёта ложится на светлую панель */
+::selection { background: var(--comment-soft); color: var(--ink); }
 
 /* стекло: размытие и насыщенность фона, кромка с бликом сверху, внутреннее свечение снизу, мягкая тень */
 .glass { position: relative; background: var(--tint);

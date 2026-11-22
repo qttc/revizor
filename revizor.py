@@ -44,7 +44,7 @@ try:
 except ImportError:  # Windows: блокировки файла правок на fcntl, без них два процесса потеряют правки
     fcntl = None
 
-__version__ = "1.6.2"
+__version__ = "1.6.3"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
