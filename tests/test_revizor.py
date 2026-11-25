@@ -18,6 +18,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import revizor  # noqa: E402
 
+# Тесты не ходят в модель и не запускают Chrome: читатель и вёрстка проверяются своими тестами на заглушках
+os.environ["REVIZOR_NO_READER"] = "1"
+os.environ["REVIZOR_NO_LAYOUT"] = "1"
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
@@ -449,7 +453,7 @@ class CliTest(unittest.TestCase):
         self.addCleanup(setattr, revizor, "CACHE", saved)
         revizor.CACHE = d / "cache"
         out = self.run_cli("check", str(page))
-        self.assertIn("Самопроверка на нейрослоп", out)
+        self.assertIn("Проверка до показа", out)
         path = Path(out.split("Видимый текст: ")[1].split(" (")[0])
         text = path.read_text(encoding="utf-8")
         self.assertEqual(text, "Итоги\nВыручка выросла на 5%.\nВторой абзац.")
@@ -1059,6 +1063,105 @@ class LearnTest(unittest.TestCase):
         self.assertTrue(files["catalog"].endswith("references/ai-tells-ru.md"))
         self.assertTrue(files["ledger"].endswith("revizor-learned.json"))
 
+
+
+class ServersTest(unittest.TestCase):
+    """Реестр запущенных open: ps, stop и перехват документа повторным open."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old = revizor.SERVERS
+        revizor.SERVERS = Path(self.tmp.name) / "servers"
+        revizor.SERVERS.mkdir()
+
+    def tearDown(self):
+        revizor.SERVERS = self.old
+        self.tmp.cleanup()
+
+    def test_dead_record_is_pruned(self):
+        (revizor.SERVERS / "a.json").write_text(json.dumps({"pid": 999999, "port": 1, "doc": "/x.md"}))
+        (revizor.SERVERS / "b.json").write_text(json.dumps({"pid": os.getpid(), "port": 2, "doc": "/y.md"}))
+        (revizor.SERVERS / "c.json").write_text("{битый")
+        self.assertEqual([r["doc"] for r in revizor.live_servers()], ["/y.md"])
+        self.assertEqual(sorted(f.name for f in revizor.SERVERS.iterdir()), ["b.json"])
+
+    def test_stop_terminates_process(self):
+        import subprocess
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            proc_done = threading.Thread(target=proc.wait, daemon=True)  # забрать зомби, иначе pid «жив»
+            proc_done.start()
+            self.assertTrue(revizor.stop_server({"pid": proc.pid}, timeout=5))
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_old_wait_leaves_when_document_reopened(self):
+        doc = Path(self.tmp.name) / "doc.md"
+        doc.write_text("# Текст\n", encoding="utf-8")
+        review = revizor.load(doc)
+        review.update({"status": "open", "opened": "t1"})
+        revizor.save(doc, review)
+        out = io.StringIO()
+        args = type("A", (), {"file": str(doc), "interval": 0.05})()
+        result = {}
+
+        def run():
+            with redirect_stdout(out):
+                result["rc"] = revizor.cmd_wait(args)
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
+        time.sleep(0.3)
+        with revizor.locked(doc):
+            review = revizor.load(doc)
+            review["opened"] = "t2"
+            revizor.save(doc, review)
+        th.join(5)
+        self.assertFalse(th.is_alive())
+        self.assertEqual(result["rc"], 0)
+        self.assertIn("открыт заново", out.getvalue())
+
+
+class CheckPartsTest(unittest.TestCase):
+    """Части проверки до показа без модели и браузера."""
+
+    def test_parse_findings_unwraps_fence(self):
+        raw = 'Вот находки:\n```json\n[{"quote": "Дело не в цене.", "rule": "antithesis"}, {"bad": 1}]\n```'
+        self.assertEqual(revizor.parse_findings(raw), [{"quote": "Дело не в цене.", "rule": "antithesis"}])
+        with self.assertRaises(ValueError):
+            revizor.parse_findings("пусто")
+
+    def test_chunks_split_on_paragraphs(self):
+        text = "\n".join(["а" * 30] * 10)
+        parts = revizor.chunks(text, size=100)
+        self.assertTrue(all(len(p) <= 100 for p in parts))
+        self.assertEqual("\n".join(parts), text)
+
+    def test_reader_keeps_only_real_quotes(self):
+        class Proc:
+            returncode, stderr = 0, ""
+            stdout = '[{"quote": "Дело не в цене.", "rule": "antithesis"}, {"quote": "выдумка", "rule": "x"}]'
+        old_env, old_run, old_which = os.environ.pop("REVIZOR_NO_READER"), revizor.subprocess.run, revizor.shutil.which
+        try:
+            revizor.subprocess.run = lambda *a, **k: Proc()
+            revizor.shutil.which = lambda name: "/bin/claude"
+            with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as cat:
+                cat.write("каталог")
+            got = revizor.reader_pass("Дело не в цене. Дело в доверии.", Path(cat.name), "em-dash", "ru")
+        finally:
+            os.environ["REVIZOR_NO_READER"] = old_env
+            revizor.subprocess.run, revizor.shutil.which = old_run, old_which
+            os.unlink(cat.name)
+        self.assertEqual([f["quote"] for f in got], ["Дело не в цене."])
+
+    def test_probe_page_keeps_document_and_adds_base(self):
+        with tempfile.TemporaryDirectory() as d:
+            doc = Path(d) / "r.html"
+            doc.write_text("<html><head><title>t</title></head><body><p>текст</p></body></html>", encoding="utf-8")
+            page = revizor.probe_page(doc)
+            self.assertIn(f'<base href="{doc.parent.as_uri()}/">', page)
+            self.assertLess(page.index("__revizor_layout"), page.rindex("</body>"))
+            self.assertEqual(doc.read_text(encoding="utf-8").count("<script"), 0)
 
 if __name__ == "__main__":
     unittest.main()

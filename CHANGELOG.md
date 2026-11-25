@@ -4,6 +4,20 @@ English · [Русский](CHANGELOG.ru.md)
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [SemVer](https://semver.org/).
 
+## [1.9.0] – 2026-11-25
+
+### Added
+
+- `check` hands the slop pass to an independent reader: a separate `claude -p` run without hooks, MCP, tools or session history sees only the text and the catalog of tells and returns findings with a quote, a tell id, a reason and a rewrite. The author no longer grades their own draft. Without `claude` in PATH, with `REVIZOR_NO_READER=1` or `--self`, `check` falls back to the author's self-check. The model is `REVIZOR_READER_MODEL`, `sonnet` by default.
+- `check` on HTML runs a layout pass in headless Chrome at 1440 and 390 px and saves a screenshot: table headers aligned differently from the numbers below them, header and column count mismatch, broken images, conclusions in a collapsed `<details>`, empty slides and sections, horizontal scroll and blocks past the right edge, clipped text in headings and cells. Slides in same-origin frames are checked too. The document itself is not changed. `--no-layout` or `REVIZOR_NO_LAYOUT=1` skips it.
+- `revizor.py ps` lists the documents Revizor holds open, `revizor.py stop FILE` and `stop --all` stop their servers.
+
+### Changed
+
+- A second `open` of the same document stops the previous server, even one left by a closed session, and takes its port. The open tab picks up the new server without a second tab. The previous `wait` notices the new open and exits, so two Live Edit loops do not compete for the same edits.
+- The tab pings the server every 3 s and resends an edit that failed to save while the server was down.
+- `<title>` no longer counts as visible text in `check`.
+
 ## [1.8.0] – 2026-11-25
 
 ### Added

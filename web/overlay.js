@@ -1993,6 +1993,18 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     }, 1500);
   }
 
+  // Повторный `open` того же документа гасит прошлый сервер и встаёт на его порт. Вкладка стучится раз в 3 с:
+  // так сервер видит, что она жива, и не открывает вторую. Правку, которая не сохранилась без сервера, досылаем.
+  let lost = false;
+  setInterval(async () => {
+    try {
+      const r = await fetch(API + "/state", { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status);
+      if (lost && $("#status").dataset.state === "error") save();
+      lost = false;
+    } catch (e) { lost = true; }
+  }, 3000);
+
   // ---------- кнопки панели ----------
 
   $("#tb").addEventListener("mousedown", (e) => e.preventDefault());

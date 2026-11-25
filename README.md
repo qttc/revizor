@@ -35,6 +35,8 @@ Edits are saved as you go to `report.review.json` next to the document. If you c
 
 ## AI slop check
 
+Before the owner sees a draft, `revizor.py check` hands the text to an independent reader: a separate `claude -p` run that sees only the text and the catalog of tells, without the author's context. An author checking their own draft misses about half of the tells because they remember what they meant. For HTML the same command opens the page in headless Chrome at 1440 and 390 px and reports misaligned table headers, blocks running off the edge, empty slides, conclusions hidden in collapsed blocks and broken images, with a screenshot.
+
 When a document opens, Revizor underlines phrases that give away a language model. On English text that means em dashes and Claude phrasing such as "less like X, more like Y", "matters because" or "without sacrificing". Russian text gets a longer rule set. The panel groups the hits by sentence: **Fix** corrects mechanical issues on the spot, **Rewrite** turns the sentence into an edit, **To agent** sends it to the agent. Mark a false positive with ✕ and it won't show again.
 
 While you read, the agent goes through the text for patterns a regex can't catch: a moral line under each paragraph, "it's not X, it's Y" contrasts, "-ing" tails that add nothing. Its findings show up in the same panel with a suggested rewrite you can accept or adjust.

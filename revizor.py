@@ -7,7 +7,9 @@
     revizor.py mark FILE ID... --state applied|rejected [--note TEXT | --notes JSON]
                                                     комментарию и отклонённой правке пометка обязательна
     revizor.py wait FILE                              ждать работу из редактора: правки Live Edit и проверку на нейрослоп
-    revizor.py check FILE                            самопроверка на нейрослоп до показа: текст, каталог, что ловят регулярки
+    revizor.py check FILE [--self] [--no-layout]     проверка до показа: независимый читатель на нейрослоп, вёрстка HTML
+    revizor.py ps                                    какие документы сейчас открыты
+    revizor.py stop [FILE | --all]                   остановить сервер документа или все
     revizor.py suggest FILE FINDINGS.json            записать находки смысловой проверки на нейрослоп
     revizor.py update [--check [--force]]            обновиться из репо (git pull) и показать, что поменялось
     revizor.py style [init]                          какой скилл стиля нашёл Ревизор; init – создать из шаблона
@@ -19,6 +21,7 @@
 """
 import argparse
 import shutil
+import signal
 import contextlib
 import hashlib
 import html
@@ -48,7 +51,7 @@ try:
 except ImportError:  # Windows: блокировки файла правок на fcntl, без них два процесса потеряют правки
     fcntl = None
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -310,6 +313,8 @@ TEXTS = CACHE / "text"  # текст страницы для смысловой 
 REOPEN_WAIT = 4  # с: вкладка опрашивает сервер раз в 1,5 с
 WAIT_GRACE = 10  # с: столько wait ждёт, что завершённое ревью откроют снова
 OWNER_CHECK = 5  # с: как часто open и wait проверяют, жив ли запустивший их процесс
+SERVERS = CACHE / "servers"  # запущенные `open`: pid, порт, документ – для `ps`, `stop` и перехвата повторным `open`
+TAKEOVER_WAIT = 6  # с: вкладка прошлого сервера опрашивает его раз в 3 с и подхватывает новый на том же порту
 CTX = 32
 MAX_BODY = 10 * 1024 * 1024  # байт: больше страница не шлёт даже с текстом большого дека
 
@@ -1303,6 +1308,68 @@ def watch_owner(orphaned: threading.Event, wake=None) -> None:
     threading.Thread(target=loop, daemon=True).start()
 
 
+def server_file(doc: Path) -> Path:
+    return SERVERS / f"{sha(str(doc))}.json"
+
+
+def live_servers() -> list:
+    """Записи живых `open`. Запись мёртвого процесса удаляется: сервер упал или машину перезагрузили."""
+    out = []
+    for f in sorted(SERVERS.glob("*.json")) if SERVERS.is_dir() else []:
+        try:
+            rec = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            f.unlink(missing_ok=True)
+            continue
+        if isinstance(rec.get("pid"), int) and pid_alive(rec["pid"]):
+            out.append(rec)
+        else:
+            f.unlink(missing_ok=True)
+    return out
+
+
+def stop_server(rec: dict, timeout: float = 5.0) -> bool:
+    """SIGTERM процессу `open`: он сохраняет статус «stopped» и освобождает порт. True – процесс вышел."""
+    try:
+        os.kill(rec["pid"], signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if not pid_alive(rec["pid"]):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def cmd_ps(args) -> int:
+    recs = live_servers()
+    if not recs:
+        print("Ревизор сейчас ничего не держит открытым.")
+        return 0
+    for r in recs:
+        print(f"{r['pid']:>7}  http://127.0.0.1:{r['port']}/  {r['doc']}  (с {r.get('started', '?')})")
+    return 0
+
+
+def cmd_stop(args) -> int:
+    recs = live_servers()
+    if not args.all:
+        if not args.file:
+            sys.exit("укажи документ или --all")
+        doc = str(resolve_doc(args))
+        recs = [r for r in recs if r["doc"] == doc]
+    if not recs:
+        print("Нечего останавливать.")
+        return 0
+    for r in recs:
+        ok = stop_server(r)
+        print(f"{'остановлен' if ok else 'не остановился'}: {r['doc']} (pid {r['pid']}, порт {r['port']})")
+    return 0
+
+
 def cmd_open(args) -> int:
     doc = resolve_doc(args, opening=True)
     if kind(doc) == "url":
@@ -1317,6 +1384,16 @@ def cmd_open(args) -> int:
             doc.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             sys.exit(f"{doc.name} не в UTF-8. Пересохрани его в UTF-8 и открой снова.")
+    # Документ уже открыт другим `open` (прошлая сессия, «открой заново») – гасим его и встаём на его порт:
+    # вкладка подхватит новый сервер сама, вторая вкладка и сирота-сервер не появляются.
+    took = None
+    for rec in live_servers():
+        if rec["doc"] == str(doc) and rec["pid"] != os.getpid():
+            if stop_server(rec):
+                took = rec
+            else:
+                print(f"Прошлый сервер этого документа (pid {rec['pid']}) не остановился, открываю на другом порту.",
+                      file=sys.stderr, flush=True)
     remember_doc(doc)
     with locked(doc):
         review = load(doc)
@@ -1324,10 +1401,10 @@ def cmd_open(args) -> int:
         if review["status"] == "done" and pending(review):
             print(f"В {sidecar(doc).name} есть {len(pending(review))} неприменённых правок, они откроются в редакторе.",
                   file=sys.stderr)
-        if review["status"] != "open" or "final" in review:
-            review["status"] = "open"
-            review.pop("final", None)  # документ снова открыт – значит, работа продолжается
-            save(doc, review)
+        review["status"] = "open"
+        review.pop("final", None)  # документ снова открыт – значит, работа продолжается
+        review["opened"] = now()  # `wait` прошлого запуска видит новую метку и выходит
+        save(doc, review)
 
     update = check_update()
     if update:
@@ -1335,6 +1412,8 @@ def cmd_open(args) -> int:
               f"Обновить: revizor.py update (или агенту – «обнови ревизор»).", file=sys.stderr, flush=True)
     done, tab_seen = threading.Event(), threading.Event()
     prev = last_port(doc)
+    if took and took.get("port"):
+        prev = took["port"]
     port = args.port or (prev if prev and is_port_free(prev) else pick_free_port())
     last_port(doc, port)
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(doc, done, update, tab_seen=tab_seen))
@@ -1345,10 +1424,23 @@ def cmd_open(args) -> int:
     else:
         url = f"http://127.0.0.1:{port}/?v={int(datetime.now().timestamp())}"
     print(f"Редактор: {url}\nПравки: {sidecar(doc)}", file=sys.stderr, flush=True)
+    SERVERS.mkdir(parents=True, exist_ok=True)
+    atomic_write(server_file(doc), json.dumps({"pid": os.getpid(), "port": port, "doc": str(doc), "started": now()},
+                                              ensure_ascii=False))
+    replaced = threading.Event()
+
+    def on_term(signum, frame):  # повторный `open` или `stop`: выйти так же, как по Ctrl+C
+        replaced.set()
+        raise KeyboardInterrupt
+    main_thread = threading.current_thread() is threading.main_thread()  # в тестах open крутится в потоке
+    if main_thread:
+        signal.signal(signal.SIGTERM, on_term)
     # После «Завершить раунд» вкладка ждёт сервер на старом порту и сама перезагружается.
     # Вкладку закрыли – через пару секунд тишины открываем новую.
     if reopen and port == prev and tab_seen.wait(REOPEN_WAIT):
         print("Вкладка с прошлого ревью подхватила редактор.", file=sys.stderr, flush=True)
+    elif took and port == prev and tab_seen.wait(TAKEOVER_WAIT):
+        print("Документ был открыт прошлым запуском: его сервер остановлен, вкладка подхватила новый.", file=sys.stderr, flush=True)
     elif not args.no_browser:
         open_browser(url)
 
@@ -1359,17 +1451,28 @@ def cmd_open(args) -> int:
         if orphaned.is_set():
             raise KeyboardInterrupt
     except KeyboardInterrupt:
+        if main_thread:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        with contextlib.suppress(OSError):
+            rec = json.loads(server_file(doc).read_text(encoding="utf-8"))
+            if rec.get("pid") == os.getpid():
+                server_file(doc).unlink()
         server.shutdown()
         server.server_close()
         with locked(doc):
             review = load(doc)
             review["status"] = "stopped"  # `wait` в Live Edit видит это и заканчивает цикл
             save(doc, review)
-        why = "Сессия, запустившая редактор, закрыта: сервер остановлен" if orphaned.is_set() else "Остановлено без «Завершить раунд»"
+        why = ("Документ открыт заново другим запуском или остановлен через stop: этот сервер закрыт" if replaced.is_set()
+               else "Сессия, запустившая редактор, закрыта: сервер остановлен" if orphaned.is_set()
+               else "Остановлено без «Завершить раунд»")
         print(f"{why}. Правки, что успели сохраниться, в {sidecar(doc)}", file=sys.stderr)
         return 130
     server.shutdown()
     server.server_close()  # порт свободен сразу: следующий `open` встанет на него
+    if main_thread:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    server_file(doc).unlink(missing_ok=True)
     review = load(doc)
     print(FINISH_WORK if review.get("final") else FINISH_ROUND)
     print(summary(doc, review))
@@ -1488,7 +1591,7 @@ def scan_task(doc: Path, review: dict) -> str:
 
 class _Visible(html.parser.HTMLParser):
     """Видимый текст HTML без браузера: CSS, JS и шаблоны пропускаются, блоки – с новой строки."""
-    SKIP = {"style", "script", "template", "noscript"}
+    SKIP = {"style", "script", "template", "noscript", "title"}
     BLOCK = {"p", "div", "section", "article", "header", "footer", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
              "br", "td", "th", "figcaption", "blockquote", "aside", "main", "nav", "dt", "dd"}
 
@@ -1536,9 +1639,221 @@ def repeated_sentences(text: str, min_len: int = 40) -> list:
     return [(s, n) for s, n in seen.items() if n > 1]
 
 
+READER_MODEL = os.environ.get("REVIZOR_READER_MODEL", "sonnet")
+READER_TIMEOUT = 300  # с на кусок текста
+READER_CHUNK = 40000  # знаков: длинный документ читается кусками по абзацам
+READER_SYSTEM = {
+    "ru": ("Ты редактор, который ищет нейрослоп в чужом тексте. Ты не автор и не знаешь, зачем текст писали. "
+           "Ищешь только смысловые приметы из каталога. Отвечаешь только JSON-массивом, без пояснений вокруг."),
+    "en": ("You are an editor hunting for AI-slop in someone else's text. You are not the author. "
+           "Look only for the semantic tells from the catalog. Reply with a JSON array only, nothing around it."),
+}
+READER_TASK = {
+    "ru": """Каталог примет:
+<<<КАТАЛОГ
+{catalog}
+КАТАЛОГ>>>
+
+Механику уже ловят регулярки, её не искать: {base}.
+
+Правила отбора: только сильные и средние приметы, слабые – если рядом есть ещё одна; 1–2 на абзац, не больше {limit} на этот кусок; чистый текст – пустой массив []. Факты и цифры не трогать и не добавлять. Содержание, полноту, методику и выводы не оценивать: только приметы из каталога.
+
+Формат ответа: [{{"quote": "точная подстрока текста, символ в символ, до 300 знаков", "rule": "id приметы из каталога", "why": "одна строка про это место", "rewrite": "как переписать; пустая строка – удалить целиком"}}]
+
+Текст:
+<<<ТЕКСТ
+{text}
+ТЕКСТ>>>""",
+    "en": """Catalog of tells:
+<<<CATALOG
+{catalog}
+CATALOG>>>
+
+Regexes already catch the mechanics, skip them: {base}.
+
+Selection: strong and medium tells only, a weak one only next to another; 1–2 per paragraph, at most {limit} in this chunk; a clean text is an empty array []. Do not change or add facts and numbers. Do not judge content, completeness, method or conclusions: catalog tells only.
+
+Reply format: [{{"quote": "exact substring of the text, character for character, up to 300 chars", "rule": "tell id from the catalog", "why": "one line about this spot", "rewrite": "how to rewrite; empty string means delete"}}]
+
+Text:
+<<<TEXT
+{text}
+TEXT>>>""",
+}
+
+
+def chunks(text: str, size: int = READER_CHUNK) -> list:
+    out, cur = [], ""
+    for para in text.split("\n"):
+        if cur and len(cur) + len(para) + 1 > size:
+            out.append(cur)
+            cur = ""
+        cur = f"{cur}\n{para}" if cur else para
+    return out + ([cur] if cur else [])
+
+
+def parse_findings(raw: str) -> list:
+    """JSON-массив из ответа модели: она иногда оборачивает его в ```json или добавляет строку перед ним."""
+    a, b = raw.find("["), raw.rfind("]")
+    if a == -1 or b < a:
+        raise ValueError("в ответе нет JSON-массива")
+    data = json.loads(raw[a:b + 1])
+    return [f for f in data if isinstance(f, dict) and isinstance(f.get("quote"), str)]
+
+
+def reader_pass(text: str, catalog: Path, base: str, lang: str):
+    """Независимый читатель: отдельный `claude -p` без контекста автора, хуков и MCP видит только текст и каталог.
+    Автор, проверяя себя, пропускает примерно половину примет: он помнит, что хотел сказать.
+    None – читателя нет (нет `claude` в PATH, REVIZOR_NO_READER=1 или он упал), тогда самопроверка автором."""
+    exe = shutil.which("claude")
+    if not exe or os.environ.get("REVIZOR_NO_READER") == "1":
+        return None
+    key = "ru" if lang == "ru" else "en"
+    try:
+        cat = catalog.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    found = []
+    parts = chunks(text)
+    for part in parts:
+        prompt = READER_TASK[key].format(catalog=cat, base=base, text=part, limit=max(5, 15 // len(parts)))
+        try:
+            proc = subprocess.run(
+                [exe, "-p", "--model", READER_MODEL, "--setting-sources", "", "--strict-mcp-config", "--tools", "",
+                 "--no-session-persistence", "--system-prompt", READER_SYSTEM[key]],
+                input=prompt, capture_output=True, text=True, timeout=READER_TIMEOUT, cwd=tempfile.gettempdir())
+            if proc.returncode != 0:
+                print(f"revizor: читатель упал ({proc.returncode}): {proc.stderr.strip()[:200]}", file=sys.stderr)
+                return None
+            items = parse_findings(proc.stdout)
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
+            print(f"revizor: читатель не ответил: {e}", file=sys.stderr)
+            return None
+        found += [f for f in items if f["quote"].strip() and f["quote"].strip() in part]
+    return found
+
+
+# ---------- вёрстка: headless Chrome ----------
+
+LAYOUT_WIDTHS = (1440, 390)
+LAYOUT_PROBE = r"""<script>(function(){
+function txt(e){return (e.innerText||e.textContent||'').trim().replace(/\s+/g,' ');}
+function short(e){var t=txt(e);return t.length>70?t.slice(0,70)+'…':t;}
+function num(t){t=t.replace(/[\s  ]/g,'');return t!==''&&/^[−\-+–]?[$€£₽]?[\d.,]+[%KkMмлнтыс×x₽$€]*$/.test(t);}
+function align(e){var a=getComputedStyle(e).textAlign;return a==='end'||a==='right'?'right':a==='center'?'center':'left';}
+function docs(){var out=[document];document.querySelectorAll('iframe').forEach(function(f){try{if(f.contentDocument&&f.contentDocument.body)out.push(f.contentDocument);}catch(e){}});return out;}
+function run(){var w=[];var W=innerWidth;
+docs().forEach(function(d){
+ d.querySelectorAll('table').forEach(function(t){
+  var rows=[].slice.call(t.rows);if(rows.length<2)return;
+  var head=rows[0];var hcells=[].slice.call(head.cells);
+  if(!hcells.some(function(c){return c.tagName==='TH';}))return;
+  var span=hcells.reduce(function(s,c){return s+(c.colSpan||1);},0);
+  var body=rows.slice(1).filter(function(r){return ![].slice.call(r.cells).every(function(c){return c.tagName==='TH';});});
+  var widest=body.reduce(function(m,r){return Math.max(m,[].slice.call(r.cells).reduce(function(s,c){return s+(c.colSpan||1);},0));},0);
+  if(span!==widest&&widest)w.push({kind:'table-columns',where:short(head),msg:'заголовков на '+span+' колонок, а в строках '+widest});
+  var col=0;hcells.forEach(function(h){var c0=col;col+=h.colSpan||1;if((h.colSpan||1)>1)return;
+   var cells=body.map(function(r){var k=0;for(var i=0;i<r.cells.length;i++){if(k===c0)return r.cells[i];k+=r.cells[i].colSpan||1;}return null;}).filter(Boolean);
+   var nums=cells.filter(function(c){return num(txt(c));});
+   if(cells.length&&nums.length/cells.length>=0.8){var ca=align(nums[0]),ha=align(h);
+    if(ca!==ha)w.push({kind:'table-header',where:txt(h)||'(пустой заголовок)',msg:'заголовок выровнен '+ha+', числа под ним '+ca});}
+  });
+ });
+ d.querySelectorAll('img').forEach(function(i){if(i.complete&&i.naturalWidth===0&&i.getAttribute('src'))w.push({kind:'image-broken',where:i.getAttribute('src').slice(0,80),msg:'картинка не загрузилась'});});
+ d.querySelectorAll('details:not([open])').forEach(function(x){var s=x.querySelector('summary');var t=s?txt(s):'';
+  if(/вывод|итог|главн|резюме|summary|conclusion|takeaway|key finding|tl;?dr/i.test(t))w.push({kind:'hidden-conclusion',where:t.slice(0,70),msg:'вывод спрятан в свёрнутый блок'});});
+ d.querySelectorAll('section,.slide,[data-slide]').forEach(function(x){if(txt(x).length<3&&!x.querySelector('img,svg,canvas,video,iframe,picture'))w.push({kind:'empty-block',where:(x.id?'#'+x.id:x.className?'.'+String(x.className).split(' ')[0]:x.tagName.toLowerCase()),msg:'пустой слайд или раздел'});});
+ if(d===document){
+  if(document.documentElement.scrollWidth>W+2)w.push({kind:'page-scroll',where:'страница',msg:'горизонтальная прокрутка: ширина '+document.documentElement.scrollWidth+' при окне '+W});
+  var seen=0;document.querySelectorAll('body *').forEach(function(e){if(seen>=5)return;var r=e.getBoundingClientRect();if(!r.width||r.right<=W+2)return;
+   for(var p=e.parentElement;p&&p!==document.body;p=p.parentElement){var o=getComputedStyle(p);if(/auto|scroll|hidden|clip/.test(o.overflowX))return;}
+   var pr=e.parentElement&&e.parentElement.getBoundingClientRect();if(pr&&pr.right>W+2)return;
+   if(!txt(e)&&!/IMG|SVG|CANVAS|TABLE|VIDEO/.test(e.tagName))return;seen++;
+   w.push({kind:'overflow',where:short(e)||e.tagName.toLowerCase(),msg:'вылезает за правый край на '+Math.round(r.right-W)+' px'});});
+ }
+ d.querySelectorAll('h1,h2,h3,h4,th,td').forEach(function(e){var o=getComputedStyle(e);
+  if(/hidden|clip/.test(o.overflowX)&&e.scrollWidth>e.clientWidth+1&&txt(e))w.push({kind:'clipped',where:short(e),msg:'текст обрезан'});});
+});
+var pre=document.createElement('pre');pre.id='__revizor_layout';pre.textContent=JSON.stringify({w:w,h:document.documentElement.scrollHeight});
+document.body.appendChild(pre);}
+addEventListener('load',function(){setTimeout(run,400);});
+})();</script>"""
+
+
+def chrome_path():
+    for p in ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+              "/Applications/Chromium.app/Contents/MacOS/Chromium"):
+        if os.path.isfile(p):
+            return p
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        if shutil.which(name):
+            return shutil.which(name)
+    return None
+
+
+def probe_page(doc: Path) -> str:
+    """Страница с пробой вёрстки во временном файле: <base> ведёт к папке документа, сам документ не трогается."""
+    if kind(doc) == "url":
+        src, base = fetch_page(doc), page_info(doc)["url"]
+    else:
+        src, base = doc.read_text(encoding="utf-8", errors="replace"), doc.parent.as_uri() + "/"
+    tag = f'<base href="{html.escape(base, quote=True)}">'
+    m = re.search(r"<head[^>]*>", src, re.I)
+    src = src[:m.end()] + tag + src[m.end():] if m else tag + src
+    last = None
+    for last in re.finditer(r"</body\s*>", src, re.I):
+        pass
+    return src[:last.start()] + LAYOUT_PROBE + src[last.start():] if last else src + LAYOUT_PROBE
+
+
+def run_chrome(chrome: str, args: list, timeout: float = 60) -> str:
+    with tempfile.TemporaryDirectory(prefix="revizor-chrome-") as prof:
+        proc = subprocess.run([chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
+                               "--no-default-browser-check", "--allow-file-access-from-files",
+                               f"--user-data-dir={prof}", "--virtual-time-budget=6000"] + args,
+                              capture_output=True, text=True, timeout=timeout)
+    return proc.stdout
+
+
+def layout_pass(doc: Path):
+    """Проверка вёрстки на 1440 и 390 px и скриншот на 1440. None – Chrome не найден."""
+    chrome = chrome_path()
+    if not chrome:
+        return None
+    page = CACHE / "check" / f"{sha(str(doc))}.layout.html"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(page, probe_page(doc))
+    warns, height = [], 900
+    for width in LAYOUT_WIDTHS:
+        try:
+            dom = run_chrome(chrome, [f"--window-size={width},900", "--dump-dom", page.as_uri()])
+        except (OSError, subprocess.SubprocessError) as e:
+            print(f"revizor: Chrome не отработал: {e}", file=sys.stderr)
+            return None
+        m = re.search(r'<pre id="__revizor_layout">(.*?)</pre>', dom, re.S)
+        if not m:
+            warns.append({"width": width, "kind": "probe", "where": "страница",
+                          "msg": "проба не отработала: страница не загрузилась за 6 с или упала"})
+            continue
+        data = json.loads(html.unescape(m.group(1)))
+        if width == LAYOUT_WIDTHS[0]:
+            height = data.get("h") or height
+        for w in data["w"]:
+            w["width"] = width
+            if not any(x["kind"] == w["kind"] and x["where"] == w["where"] for x in warns):
+                warns.append(w)
+    shot = CACHE / "check" / f"{sha(str(doc))}.png"
+    try:
+        run_chrome(chrome, [f"--window-size={LAYOUT_WIDTHS[0]},{min(max(int(height), 900), 16000)}",
+                            f"--screenshot={shot}", page.as_uri()])
+    except (OSError, subprocess.SubprocessError):
+        shot = None
+    return warns, (shot if shot and shot.is_file() else None)
+
+
 def cmd_check(args) -> int:
-    """Самопроверка до показа: тот же смысловой проход, что страница просит при открытии, только агент правит
-    исходник сам, и владелец получает документ уже без этих примет. Сервер и браузер не нужны."""
+    """Проверка до показа владельцу. Смысловой проход делает независимый читатель (`claude -p` без контекста автора),
+    вёрстку HTML – headless Chrome. Агент исправляет найденное в исходнике, владелец получает документ уже чистым."""
     doc = resolve_doc(args)
     text = visible_text(doc)
     out = CACHE / "check" / f"{sha(str(doc))}.txt"
@@ -1547,20 +1862,47 @@ def cmd_check(args) -> int:
     lang = text_lang(text)
     skill, catalog, where = catalog_for(lang)
     base = rule_ids(skill, lang)
-    print("\n".join([
-        f"Самопроверка на нейрослоп: {display(doc)}",
-        f"Видимый текст: {out} ({len(text)} знаков)" + (" – бандл без текста: проверять исходник дека" if is_markup(doc) and len(text) < 200 else ""),
-        f"Язык: {lang}",
-        f"Каталог примет: {catalog}{where}",
-        f"Регулярки ловят сами, не искать: {base}",
-        "Найти приметы по разделу «Самопроверка до показа» скилла revizor и исправить их в исходнике документа. "
-        "Пересобрать экспорт, если он есть, и только потом открывать редактор.",
-    ]))
+    bundle = is_markup(doc) and len(text) < 200
+    print(f"Проверка до показа: {display(doc)}")
+    print(f"Видимый текст: {out} ({len(text)} знаков)" + (" – бандл без текста: проверять исходник дека" if bundle else ""))
+    found = None if (args.self or bundle) else reader_pass(text, catalog, base, lang)
+    if found is None:
+        print("\n".join([
+            f"Язык: {lang}",
+            f"Каталог примет: {catalog}{where}",
+            f"Регулярки ловят сами, не искать: {base}",
+            ("Независимого читателя нет (нужен `claude` в PATH), самопроверка автором. " if not args.self and not bundle else "")
+            + "Найти приметы по разделу «Самопроверка до показа» скилла revizor и исправить их в исходнике документа. "
+            "Пересобрать экспорт, если он есть, и только потом открывать редактор.",
+        ]))
+    else:
+        saved = CACHE / "check" / f"{sha(str(doc))}.findings.json"
+        atomic_write(saved, json.dumps(found, ensure_ascii=False, indent=2))
+        print(f"Независимый читатель ({READER_MODEL}, каталог{where}): {len(found)} мест. JSON: {saved}")
+        for f in found:
+            rw = f.get("rewrite")
+            tail = " → удалить" if rw == "" else f" → {rw}" if isinstance(rw, str) else ""
+            print(f"  [{f.get('rule', '?')}] «{f['quote'][:160]}»{tail}" + (f"  ({f['why']})" if f.get("why") else ""))
+        if found:
+            print("Исправить каждое место в исходнике по скиллу стиля: факты и цифры не трогать. Читатель ошибается – "
+                  "находку, с которой не согласен, пропустить и сказать владельцу одной строкой. "
+                  "Пересобрать экспорт и только потом открывать редактор.")
     dups = repeated_sentences(text)
     if dups:
         print("Повторы предложений – оставить там, где отвечают на вопрос раздела:")
         for s, n in dups[:10]:
             print(f"  ×{n} {s[:120]}")
+    if is_markup(doc) and not args.no_layout and os.environ.get("REVIZOR_NO_LAYOUT") != "1":
+        res = layout_pass(doc)
+        if res is None:
+            print("Вёрстка: Chrome не найден, проверка пропущена.")
+        else:
+            warns, shot = res
+            print(f"Вёрстка (1440 и 390 px): {len(warns)} замечаний." + (f" Скриншот 1440: {shot}" if shot else ""))
+            for w in warns[:30]:
+                print(f"  [{w['kind']}, {w['width']} px] {w['where']}: {w['msg']}")
+            if warns:
+                print("Это эвристики: исправить настоящие поломки, ложные пропустить. Скриншот посмотреть глазами.")
     return 0
 
 
@@ -1612,6 +1954,7 @@ def cmd_wait(args) -> int:
     grace = time.monotonic() + WAIT_GRACE
     orphaned = threading.Event()
     watch_owner(orphaned)
+    opened = None  # метка открытия, при которой wait стартовал
     while True:
         if orphaned.is_set():
             print(f"Сессия, запустившая wait, закрыта: Live Edit для {doc.name} остановлен.")
@@ -1624,6 +1967,13 @@ def cmd_wait(args) -> int:
             print(f"Ревью {doc.name} завершено, Live Edit остановлен. Оставшиеся правки – в выводе open.")
             return 0
         fresh, review = got
+        if review is not None:
+            mark = review.get("opened")
+            if opened is None:
+                opened = mark
+            elif mark != opened:
+                print(f"{doc.name} открыт заново другим запуском open: этот Live Edit остановлен, правки заберёт новый wait.")
+                return 0
         if fresh == "scan":
             print(scan_task(doc, review), flush=True)
             return 0
@@ -1659,9 +2009,17 @@ def main(argv=None) -> int:
     p.add_argument("file")
     p.add_argument("--interval", type=float, default=1.0)
     p.set_defaults(fn=cmd_wait)
-    p = sub.add_parser("check", help="самопроверка на нейрослоп до показа владельцу")
+    p = sub.add_parser("check", help="проверка до показа: независимый читатель на нейрослоп и вёрстка HTML")
     p.add_argument("file")
+    p.add_argument("--self", action="store_true", help="без независимого читателя: приметы ищет сам агент")
+    p.add_argument("--no-layout", action="store_true", help="без проверки вёрстки в Chrome")
     p.set_defaults(fn=cmd_check)
+    p = sub.add_parser("ps", help="какие документы Ревизор сейчас держит открытыми")
+    p.set_defaults(fn=cmd_ps)
+    p = sub.add_parser("stop", help="остановить сервер документа или все (--all)")
+    p.add_argument("file", nargs="?")
+    p.add_argument("--all", action="store_true")
+    p.set_defaults(fn=cmd_stop)
     p = sub.add_parser("suggest", help="записать находки смысловой проверки на нейрослоп")
     p.add_argument("file")
     p.add_argument("findings", help="JSON: [{quote, rewrite, rule, title, why, root}] или - для stdin")
