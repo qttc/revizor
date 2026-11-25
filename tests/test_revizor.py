@@ -12,7 +12,7 @@ import unittest
 import urllib.error
 import urllib.request
 from contextlib import redirect_stderr, redirect_stdout
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -538,10 +538,142 @@ class LiveEditTest(ServerTest.__base__):
     def test_overlay_has_live_ui(self):
         js = urllib.request.urlopen(self.base + "/_revizor/overlay.js").read().decode()
         for s in ("Live Edit", "Отправить агенту", "Агент применяет…", "Завершить раунд", "Завершить работу",
-                  'id="done-menu"', "final: !!final", "/api/source", 'd.addEventListener("dblclick"'):
+                  'id="done-menu"', "final: !!final", "API + \"/source\"", 'd.addEventListener("dblclick"'):
             self.assertIn(s, js)
         self.assertNotIn(">Готово<", js)
 
+
+
+class PageProxyTest(unittest.TestCase):
+    """Страница дев-сервера: Ревизор стоит между вкладкой и дев-сервером, вставляет слой и пропускает остальное."""
+
+    HTML = "<!doctype html><html><head><title>Лендинг</title></head><body><h1>Unlock your full potential</h1></body></html>"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved = revizor.PAGES
+        revizor.PAGES = Path(self.tmp.name) / "pages"
+        html, seen = self.HTML, []
+        self.seen = seen
+
+        class Dev(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                seen.append((self.command, self.path, dict(self.headers)))
+                if self.headers.get("Upgrade", "").lower() == "websocket":
+                    self.send_response(101)
+                    self.send_header("Upgrade", "websocket")
+                    self.send_header("Connection", "Upgrade")
+                    self.end_headers()
+                    self.wfile.flush()
+                    data = self.connection.recv(64)
+                    self.connection.sendall(b"echo:" + data)
+                    return
+                if self.path == "/old":
+                    self.send_response(302)
+                    self.send_header("Location", f"http://{self.headers['Host']}/landing")
+                    self.end_headers()
+                    return
+                body, ctype = (html.encode(), "text/html; charset=utf-8") if self.path.startswith("/landing") else (b"console.log(1)", "text/javascript")
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Security-Policy", "script-src 'none'")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(n)
+                seen.append((self.command, self.path, dict(self.headers)))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body) + 5))
+                self.end_headers()
+                self.wfile.write(b"site:" + body)
+
+        self.dev = ThreadingHTTPServer(("127.0.0.1", 0), Dev)
+        threading.Thread(target=self.dev.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.dev.server_address[1]}/landing"
+        self.doc = revizor.url_anchor(self.url, Path(self.tmp.name))
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), revizor.make_handler(self.doc, threading.Event(), skill=None))
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self):
+        for s in (self.server, self.dev):
+            s.shutdown()
+            s.server_close()
+        revizor.PAGES = self.saved
+        self.tmp.cleanup()
+
+    def test_page_gets_overlay_and_loses_csp(self):
+        res = urllib.request.urlopen(self.base + "/landing")
+        page = res.read().decode()
+        self.assertIn("Unlock your full potential", page)
+        self.assertIn(revizor.OVERLAY_TAG, page)
+        self.assertIsNone(res.headers.get("Content-Security-Policy"))
+        self.assertEqual(self.seen[-1][2]["Host"], f"127.0.0.1:{self.dev.server_address[1]}")
+
+    def test_assets_pass_through_untouched(self):
+        res = urllib.request.urlopen(self.base + "/app.js")
+        self.assertEqual(res.read(), b"console.log(1)")
+        self.assertEqual(res.headers["Content-Security-Policy"], "script-src 'none'")
+
+    def test_site_api_goes_to_dev_server(self):
+        req = urllib.request.Request(self.base + "/api/subscribe", data=b"x", method="POST", headers={"Content-Type": "text/plain"})
+        self.assertEqual(urllib.request.urlopen(req).read(), b"site:x")
+
+    def test_revizor_api_under_prefix(self):
+        st = json.loads(urllib.request.urlopen(self.base + "/_revizor/api/state").read())
+        self.assertEqual(st["doc"]["type"], "url")
+        self.assertEqual(st["doc"]["path"], self.url)
+        post(self.base + "/_revizor/api/review", {"items": [{"id": "a", "kind": "comment", "scope": "doc", "comment": "короче"}]})
+        self.assertEqual(revizor.load(self.doc)["items"][0]["comment"], "короче")
+
+    def test_redirect_stays_on_revizor(self):
+        class Stop(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **k):
+                return None
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            urllib.request.build_opener(Stop).open(self.base + "/old")
+        self.assertEqual(e.exception.headers["Location"], "/landing")
+
+    def test_websocket_is_tunnelled(self):
+        s = socket.create_connection(("127.0.0.1", self.server.server_address[1]), timeout=5)
+        s.sendall(b"GET /hmr HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                  b"Sec-WebSocket-Key: x\r\nSec-WebSocket-Version: 13\r\n\r\n" % self.server.server_address[1])
+        head = b""
+        while b"\r\n\r\n" not in head:
+            head += s.recv(1024)
+        self.assertIn(b" 101 ", head.split(b"\r\n")[0])
+        s.sendall(b"ping")
+        rest = head.split(b"\r\n\r\n", 1)[1]
+        while len(rest) < 9:
+            rest += s.recv(64)
+        self.assertEqual(rest, b"echo:ping")
+        s.close()
+
+    def test_summary_points_to_sources_and_url(self):
+        item = {"id": "e1", "kind": "edit", "scope": "text", "quote": "Unlock your full potential", "replacement": "Ship faster",
+                "prefix": "", "suffix": ""}
+        out = revizor.summary(self.doc, {"items": [item]})
+        self.assertIn("Страница дев-сервера", out)
+        self.assertIn(f"mark {self.url}", out)
+        self.assertNotIn("строка", out.split("\n")[2])
+
+    def test_only_local_dev_server(self):
+        with self.assertRaises(SystemExit):
+            revizor.url_anchor("https://example.com/", Path(self.tmp.name))
+        with self.assertRaises(SystemExit):
+            revizor.url_anchor("http://127.0.0.1:1/never-opened")
+        self.assertEqual(revizor.url_anchor(self.url), self.doc)
+
+    def test_check_reads_page_text(self):
+        self.assertIn("Unlock your full potential", revizor.visible_text(self.doc))
+        self.assertEqual(revizor.doc_lang(self.doc), "en")
 
 
 class StyleSkillTest(unittest.TestCase):
@@ -691,7 +823,7 @@ class RadarServerTest(ServerTest.__base__):
 
     def test_overlay_has_radar(self):
         js = urllib.request.urlopen(self.base + "/_revizor/overlay.js").read().decode()
-        for s in ("rv-slop", "Нейрослоп", "Это не нейрослоп", "/api/rules"):
+        for s in ("rv-slop", "Нейрослоп", "Это не нейрослоп", "/_revizor/api"):
             self.assertIn(s, js)
 
 

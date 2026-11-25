@@ -23,28 +23,32 @@ import contextlib
 import hashlib
 import html
 import html.parser
+import gzip
 import json
 import mimetypes
 import os
 import re
 import socket
+import ssl
 import subprocess
 import tempfile
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 try:
     import fcntl
 except ImportError:  # Windows: блокировки файла правок на fcntl, без них два процесса потеряют правки
     fcntl = None
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -55,6 +59,8 @@ MD_SUFFIXES = {".md", ".markdown"}
 HTML_SUFFIXES = {".html", ".htm"}
 ASSET_PREFIX = "/_revizor/"
 OVERLAY_TAG = f'<script src="{ASSET_PREFIX}overlay.js" defer></script>'
+API_PREFIX = ASSET_PREFIX + "api/"  # API под префиксом Ревизора: у страницы дев-сервера свой /api/
+URL_SUFFIX = ".url"  # якорь страницы дев-сервера в кэше: адрес и папка проекта, файл правок лежит рядом с ним
 FORMAT_VERSION = 1
 RULES_DIR = ROOT / "rules"
 BASE_RULES = ("ru.json", "en.json")  # правило с полем lang работает только на строках своего языка
@@ -138,9 +144,90 @@ def sha(text: str) -> str:
 
 
 def kind(doc: Path) -> str:
-    """html – отдаётся как есть, md – Markdown с двумя видами, text – простой текст."""
+    """html – отдаётся как есть, md – Markdown с двумя видами, text – простой текст, url – страница дев-сервера."""
     suffix = doc.suffix.lower()
-    return "html" if suffix in HTML_SUFFIXES else "md" if suffix in MD_SUFFIXES else "text"
+    return "html" if suffix in HTML_SUFFIXES else "md" if suffix in MD_SUFFIXES else "url" if suffix == URL_SUFFIX else "text"
+
+
+def is_markup(doc: Path) -> bool:
+    """HTML-отчёт или страница дев-сервера: текст – это видимый текст страницы, строк исходника нет."""
+    return kind(doc) in ("html", "url")
+
+
+# ---------- страница дев-сервера ----------
+
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def is_url(s) -> bool:
+    return isinstance(s, str) and bool(re.match(r"https?://", s, re.I))
+
+
+def url_anchor(url: str, root=None) -> Path:
+    """Страница дев-сервера как документ: якорь в кэше по адресу. open пишет в него папку проекта, остальные
+    команды берут готовый. Адрес – только локальный: Ревизор не ходит в сеть за чужими страницами."""
+    u = urlsplit(url)
+    if u.scheme.lower() not in ("http", "https") or (u.hostname or "").lower() not in LOCAL_HOSTS:
+        sys.exit(f"по адресу Ревизор открывает только локальный дев-сервер (http://localhost:<порт>/...): {url}")
+    path = u.path or "/"
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", f"{u.hostname}-{u.port or ''}{path}").strip("-") or "page"
+    anchor = PAGES / f"{slug}{URL_SUFFIX}"
+    data = {"url": urlunsplit((u.scheme.lower(), u.netloc, path, u.query, "")), "root": str(root) if root else None}
+    if root is None:
+        if not anchor.is_file():
+            sys.exit(f"страница {url} ещё не открывалась в Ревизоре: сначала revizor.py open {url}")
+        return anchor
+    try:
+        old = json.loads(anchor.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = None
+    if old != data:
+        PAGES.mkdir(parents=True, exist_ok=True)
+        atomic_write(anchor, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    return anchor
+
+
+def page_info(doc: Path) -> dict:
+    return json.loads(doc.read_text(encoding="utf-8"))
+
+
+def display(doc: Path) -> str:
+    """Как назвать документ агенту: страницу – адресом, по нему же работают mark, show и wait."""
+    return page_info(doc)["url"] if kind(doc) == "url" else str(doc)
+
+
+def _local_ssl():
+    ctx = ssl.create_default_context()
+    ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE  # самоподписанный сертификат дев-сервера на localhost
+    return ctx
+
+
+def fetch_page(doc: Path, timeout: float = 5.0) -> str:
+    url = page_info(doc)["url"]
+    req = urllib.request.Request(url, headers={"Accept": "text/html", "Accept-Encoding": "identity"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_local_ssl()) as res:
+            raw = res.read()
+            if res.headers.get("Content-Encoding", "").lower() == "gzip":
+                raw = gzip.decompress(raw)
+            return raw.decode(res.headers.get_content_charset() or "utf-8", errors="replace")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise ReviewError(f"дев-сервер не отвечает на {url} ({e}). Запусти его (npm run dev или как принято в проекте).") from e
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Редирект дев-сервера уходит вкладке как есть: она сама перейдёт, и адрес в ней останется адресом Ревизора."""
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+# заголовки одного соединения: прокси их не пересылает (RFC 9110, 7.6.1)
+HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"}
+
+
+def doc_text(doc: Path) -> str:
+    """Текст документа для отпечатка и проверок: файл с диска или HTML страницы дев-сервера."""
+    return fetch_page(doc) if kind(doc) == "url" else doc.read_text(encoding="utf-8")
 
 
 def overlay_bundle(with_md: bool = False) -> bytes:
@@ -218,6 +305,7 @@ def pending(review: dict) -> list:
 
 
 LOCKS = CACHE / "locks"
+PAGES = CACHE / "pages"  # якоря страниц дев-сервера и их файлы правок
 TEXTS = CACHE / "text"  # текст страницы для смысловой проверки: у бандла и HTML его видит только страница
 REOPEN_WAIT = 4  # с: вкладка опрашивает сервер раз в 1,5 с
 WAIT_GRACE = 10  # с: столько wait ждёт, что завершённое ревью откроют снова
@@ -245,14 +333,14 @@ def locked(doc: Path):
 
 def show_text(s: str, doc: Path) -> str:
     """Для сводки: в HTML переносы и отступы вёрстки – шум, в тексте перенос виден как ⏎."""
-    if kind(doc) == "html":
+    if is_markup(doc):
         return re.sub(r"\s+", " ", s)
     return s.replace("\n", "⏎")
 
 
 def line_of(doc: Path, item: dict):
     """Номер строки правки в текстовом документе: агент открывает файл сразу на нужном месте."""
-    if kind(doc) == "html" or item.get("frame") or item.get("orphan"):
+    if is_markup(doc) or item.get("frame") or item.get("orphan"):
         return None
     text = doc.read_text(encoding="utf-8")
     start = item.get("start")
@@ -265,12 +353,18 @@ def summary(doc: Path, review: dict, items=None, head=None) -> str:
     if items is None:
         # правки, которые уже забрал `wait`, агент применяет в цикле Live Edit – второй раз их не выдавать
         items = [i for i in pending(review) if not i.get("taken")]
-    out = [head or f"Правки к {doc}: {len(items)} ждут агента. Файл: {sidecar(doc)}"]
+    out = [head or f"Правки к {display(doc)}: {len(items)} ждут агента. Файл: {sidecar(doc)}"]
     busy = [i["id"] for i in pending(review) if i.get("taken")]
     if busy and head is None:
         out.append(f"Ещё применяются в Live Edit: {', '.join(busy)}")
     if review.get("register"):
         out.append(f"Регистр: {review['register']}")
+    if items and kind(doc) == "url":
+        root = page_info(doc).get("root")
+        out.append(f"Страница дев-сервера, проект {root}. Текст живёт в исходниках проекта: цитату искать там (rg -F, без "
+                   "node_modules и сборки), в компонентах, разметке, JSON с текстами и переводами, и править в исходнике. "
+                   "Нашлась в нескольких местах – выбрать по «где» и блоку, не уверен – спросить владельца. "
+                   "Дев-сервер перезагрузит страницу сам.")
     if items and is_bundle(doc):
         out.append("Документ – самораспаковывающийся бандл: текст слайдов сжат внутри файла. Правки применять в исходнике"
                    " дека, слайд – в поле раздела (первая часть до « · »).")
@@ -307,7 +401,7 @@ def summary(doc: Path, review: dict, items=None, head=None) -> str:
             out.append(f"  приём: {i['rule']} – найден проверкой на нейрослоп")
     if items:
         out.append("")
-        out.append(f"После применения: revizor.py mark {doc} ID... --state applied (или rejected). "
+        out.append(f"После применения: revizor.py mark {display(doc)} ID... --state applied (или rejected). "
                    "Комментарию и отклонённой правке – пометка: --notes '{\"ID\": \"что сделано или почему нет\"}'")
     return "\n".join(out)
 
@@ -428,8 +522,11 @@ def text_lang(text: str) -> str:
 
 
 def doc_lang(doc: Path) -> str:
-    raw = doc.read_text(encoding="utf-8", errors="replace")
-    if kind(doc) == "html":  # скрипты и стили не текст, в бандле там ещё и сжатые слайды латиницей
+    try:
+        raw = fetch_page(doc) if kind(doc) == "url" else doc.read_text(encoding="utf-8", errors="replace")
+    except ReviewError:
+        return "ru"  # дев-сервер ещё не поднялся: язык уточнит смысловая проверка по тексту со страницы
+    if is_markup(doc):  # скрипты и стили не текст, в бандле там ещё и сжатые слайды латиницей
         raw = re.sub(r"<(script|style)\b.*?</\1>|<[^>]+>", " ", raw, flags=re.S | re.I)
     return text_lang(raw)
 
@@ -615,6 +712,10 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
     if skill == "auto":
         skill = find_style_skill(lang=doc_lang(doc))
     lang = ui_lang()
+    page = kind(doc) == "url"
+    up = urlsplit(page_info(doc)["url"]) if page else None
+    up_origin = f"{up.scheme}://{up.netloc}" if page else None
+    opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=_local_ssl())) if page else None
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -669,8 +770,19 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
         def do_POST(self):
             self.guarded(self.post, post=True)
 
+        def other(self):
+            """HEAD, PUT, DELETE и прочее – только страница дев-сервера, у самого Ревизора таких запросов нет."""
+            if not page or self.ours():
+                return self.send(405, b"method not allowed", "text/plain")
+            self.guarded(self.proxy, post=False)
+        do_HEAD = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = other
+
+        def ours(self) -> bool:
+            return self.path.startswith(ASSET_PREFIX)
+
         def guarded(self, fn, post):
-            if not self.allowed(post):
+            # запросы самой страницы дев-сервера идут к нему как есть: строгая проверка POST – только для API Ревизора
+            if not self.allowed(post and not (page and not self.ours())):
                 return self.send(403, b"forbidden", "text/plain")
             try:
                 fn()
@@ -690,9 +802,13 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
         def get(self):
             if tab_seen:
                 tab_seen.set()
+            if page and not self.ours():
+                return self.proxy()
             path = unquote(self.path.split("?")[0])
             if "\x00" in path:
                 raise BadRequest(400, "в пути нулевой байт")
+            if path.startswith(API_PREFIX):
+                path = "/api/" + path[len(API_PREFIX):]  # слой ходит в API под префиксом Ревизора, старые вкладки – в /api/
             if path == "/":
                 if kind(doc) != "html":
                     return self.send(200, text_shell(doc).encode("utf-8"), "text/html; charset=utf-8")
@@ -722,22 +838,27 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
                 if any(part.startswith(".") for part in (*Path(rel).parts, *f.relative_to(doc.parent).parts)):
                     return self.send(404, b"not found", "text/plain")
                 self.send(200, f.read_bytes(), mimetypes.guess_type(f.name)[0] or "application/octet-stream")
-            elif path == "/api/source" and kind(doc) != "html":
+            elif path == "/api/source" and not is_markup(doc):
                 # Live Edit: агент поменял текст – страница перерисовывает его на месте, без перезагрузки
                 self.send(200, doc.read_text(encoding="utf-8").encode("utf-8"), "text/plain; charset=utf-8")
             elif path == "/api/rules":
                 self.send_json(load_rules(skill))
             elif path == "/api/state":
-                text = doc.read_text(encoding="utf-8")
+                text = doc_text(doc)
                 with lock:
                     review = load(doc)
-                self.send_json({"doc": {"name": doc.name, "path": str(doc), "type": kind(doc), "sha": sha(text)},
+                name = up.netloc + (up.path or "/") if page else doc.name
+                self.send_json({"doc": {"name": name, "path": display(doc), "type": kind(doc), "sha": sha(text)},
                                 "review": review, "update": update, "ui_lang": lang})
             else:
                 self.send(404, b"not found", "text/plain")
 
         def post(self):
+            if page and not self.ours():
+                return self.proxy()
             path = self.path.split("?")[0]
+            if path.startswith(API_PREFIX):
+                path = "/api/" + path[len(API_PREFIX):]
             if path == "/api/scan":
                 return self.request_scan(self.read_json())
             if path not in ("/api/review", "/api/done"):
@@ -757,7 +878,7 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
                 review["register_auto"] = bool(body.get("register_auto"))
                 if body.get("view") in ("md", "plain"):
                     review["view"] = body["view"]  # вид Markdown – порт каждый раз новый, localStorage его не удержит
-                review["doc_sha"] = sha(doc.read_text(encoding="utf-8"))
+                review["doc_sha"] = sha(doc_text(doc))
                 review["status"] = "done" if path == "/api/done" else "open"
                 if path == "/api/done":
                     review["final"] = body.get("final") is True  # «Завершить работу» – последний круг, иначе раунд
@@ -765,6 +886,113 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
             self.send_json({"ok": True, "updated": review["updated"], "closed": closed})
             if path == "/api/done":
                 done.set()
+
+        # ---------- страница дев-сервера: Ревизор между вкладкой и дев-сервером ----------
+
+        def upstream_headers(self) -> dict:
+            own = {f"http://{h}" for h in (f"127.0.0.1:{self.server.server_address[1]}", f"localhost:{self.server.server_address[1]}")}
+            out = {}
+            for k, v in self.headers.items():
+                kl = k.lower()
+                if kl in HOP or kl in ("host", "accept-encoding", "content-length"):
+                    continue
+                if kl in ("origin", "referer"):  # для дев-сервера запрос пришёл с его же адреса: Vite и Next проверяют Origin
+                    v = next((up_origin + v[len(o):] for o in own if v.startswith(o)), v)
+                out[k] = v
+            out["Host"] = up.netloc
+            out["Accept-Encoding"] = "identity"  # HTML нужен несжатым, чтобы вставить слой
+            return out
+
+        def proxy(self):
+            if self.headers.get("Upgrade", "").lower() == "websocket":
+                return self.tunnel()  # горячая перезагрузка Vite, Astro и Next идёт по websocket
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                raise BadRequest(400, "Content-Length – не число")
+            body = self.rfile.read(n) if n > 0 else None
+            req = urllib.request.Request(up_origin + self.path, data=body, method=self.command, headers=self.upstream_headers())
+            try:
+                res = opener.open(req, timeout=60)
+            except urllib.error.HTTPError as e:
+                res = e  # 3xx, 404, 500 дев-сервера – ответ страницы, вкладка должна его увидеть
+            except (urllib.error.URLError, OSError) as e:
+                msg = f"Дев-сервер {up_origin} не отвечает ({e}). Запусти его и обнови вкладку."
+                return self.send(502, msg.encode("utf-8"), "text/plain; charset=utf-8")
+            with res:
+                status = getattr(res, "status", None) or res.code
+                ctype = res.headers.get("Content-Type", "")
+                html_page = self.command == "GET" and ctype.lower().startswith("text/html")
+                self.send_response(status)
+                for k, v in res.headers.items():
+                    kl = k.lower()
+                    if kl in HOP or kl in ("content-length", "server", "date") or (html_page and kl in (
+                            "content-encoding", "content-security-policy", "content-security-policy-report-only")):
+                        continue  # CSP страницы могла бы не пустить скрипт слоя
+                    if kl == "location" and v.startswith(up_origin):
+                        v = v[len(up_origin):] or "/"
+                    self.send_header(k, v)
+                if html_page:
+                    raw = res.read()
+                    if res.headers.get("Content-Encoding", "").lower() == "gzip":
+                        raw = gzip.decompress(raw)
+                    data = inject(raw.decode(res.headers.get_content_charset() or "utf-8", errors="replace")).encode("utf-8")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                if res.headers.get("Content-Length"):
+                    self.send_header("Content-Length", res.headers["Content-Length"])
+                self.end_headers()
+                if self.command == "HEAD":
+                    return
+                # остальное – потоком: скрипты, картинки и поток событий (EventSource) без конца
+                while True:
+                    chunk = res.read1(65536) if hasattr(res, "read1") else res.read(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+
+        def tunnel(self):
+            """Websocket – трубой: запрос с заголовками уходит дев-серверу, дальше байты в обе стороны до закрытия."""
+            try:
+                sock = socket.create_connection((up.hostname, up.port or (443 if up.scheme == "https" else 80)), timeout=10)
+                if up.scheme == "https":
+                    sock = _local_ssl().wrap_socket(sock, server_hostname=up.hostname)
+            except OSError:
+                return self.send(502, b"dev server is not responding", "text/plain")
+            head = [f"{self.command} {self.path} HTTP/1.1", f"Host: {up.netloc}"]
+            head += [f"{k}: {v}" for k, v in self.upstream_headers().items() if k.lower() not in ("host", "accept-encoding")]
+            head += ["Connection: Upgrade", "Upgrade: websocket"]
+            sock.sendall(("\r\n".join(head) + "\r\n\r\n").encode("latin-1"))
+            client = self.connection
+            sock.settimeout(None)
+            client.settimeout(None)
+
+            def pump(src, dst):
+                try:
+                    while True:
+                        data = src.recv(65536)
+                        if not data:
+                            break
+                        dst.sendall(data)
+                except OSError:
+                    pass
+                finally:
+                    for x in (src, dst):
+                        try:
+                            x.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+
+            back = threading.Thread(target=pump, args=(sock, client), daemon=True)
+            back.start()
+            pump(client, sock)
+            back.join(5)
+            sock.close()
+            self.close_connection = True
 
         def request_scan(self, body):
             """Страница прислала свой текст: агент в цикле `wait` прочитает его и найдёт смысловые приметы нейрослопа."""
@@ -776,7 +1004,7 @@ def make_handler(doc: Path, done: threading.Event, update=None, skill="auto", ta
             atomic_write(text_cache(doc), json.dumps({"doc": str(doc), "roots": roots}, ensure_ascii=False))
             with lock, locked(doc):
                 review = load(doc)
-                review["scan"] = {"state": "requested", "requested": now(), "sha": sha(doc.read_text(encoding="utf-8"))}
+                review["scan"] = {"state": "requested", "requested": now(), "sha": sha(doc_text(doc))}
                 save(doc, review)
             self.send_json({"ok": True, "scan": review["scan"]})
 
@@ -1018,7 +1246,10 @@ def open_browser(url: str) -> None:
     print(f"Браузер не открылся сам. Открой ссылку: {url}", file=sys.stderr, flush=True)
 
 
-def resolve_doc(args) -> Path:
+def resolve_doc(args, opening=False) -> Path:
+    if is_url(args.file):
+        # open запоминает папку проекта: агент правит исходники оттуда, а не HTML страницы
+        return url_anchor(args.file, Path.cwd().resolve() if opening else None)
     doc = Path(args.file).expanduser().resolve()
     if not doc.is_file():
         sys.exit(f"нет файла: {doc}")
@@ -1073,13 +1304,19 @@ def watch_owner(orphaned: threading.Event, wake=None) -> None:
 
 
 def cmd_open(args) -> int:
-    doc = resolve_doc(args)
-    if doc.suffix.lower() not in TEXT_SUFFIXES | HTML_SUFFIXES:
-        sys.exit(f"поддерживаются {', '.join(sorted(TEXT_SUFFIXES | HTML_SUFFIXES))}: {doc.name}")
-    try:
-        doc.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        sys.exit(f"{doc.name} не в UTF-8. Пересохрани его в UTF-8 и открой снова.")
+    doc = resolve_doc(args, opening=True)
+    if kind(doc) == "url":
+        try:
+            fetch_page(doc)
+        except ReviewError as e:
+            sys.exit(str(e))
+    elif doc.suffix.lower() not in TEXT_SUFFIXES | HTML_SUFFIXES:
+        sys.exit(f"поддерживаются {', '.join(sorted(TEXT_SUFFIXES | HTML_SUFFIXES))} и адрес дев-сервера: {doc.name}")
+    else:
+        try:
+            doc.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            sys.exit(f"{doc.name} не в UTF-8. Пересохрани его в UTF-8 и открой снова.")
     remember_doc(doc)
     with locked(doc):
         review = load(doc)
@@ -1102,7 +1339,11 @@ def cmd_open(args) -> int:
     last_port(doc, port)
     server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(doc, done, update, tab_seen=tab_seen))
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    url = f"http://127.0.0.1:{port}/?v={int(datetime.now().timestamp())}"
+    if kind(doc) == "url":  # та же страница, только через Ревизор: путь и параметры адреса сохраняются
+        up = urlsplit(page_info(doc)["url"])
+        url = f"http://127.0.0.1:{port}{up.path or '/'}" + (f"?{up.query}" if up.query else "")
+    else:
+        url = f"http://127.0.0.1:{port}/?v={int(datetime.now().timestamp())}"
     print(f"Редактор: {url}\nПравки: {sidecar(doc)}", file=sys.stderr, flush=True)
     # После «Завершить раунд» вкладка ждёт сервер на старом порту и сама перезагружается.
     # Вкладку закрыли – через пару секунд тишины открываем новую.
@@ -1234,14 +1475,14 @@ def scan_task(doc: Path, review: dict) -> str:
     skill, catalog, where = catalog_for(lang)
     base = rule_ids(skill, lang)
     return "\n".join([
-        f"Проверка на нейрослоп: {doc}",
+        f"Проверка на нейрослоп: {display(doc)}",
         f"Текст страницы: {text_cache(doc)} (roots[].key – корень: \"\" страница, иначе фрейм слайда)",
         f"Язык: {lang}",
         f"Каталог примет: {catalog}{where}",
         f"Регистр: {review.get('register') or 'определить по тексту'}",
         f"Уже ловят регулярки, не повторять: {base}",
         "Найти смысловые приметы по разделу «Проверка на нейрослоп» скилла revizor, записать: "
-        f"revizor.py suggest {doc} <findings.json>, потом снова запустить wait в фоне.",
+        f"revizor.py suggest {display(doc)} <findings.json>, потом снова запустить wait в фоне.",
     ])
 
 
@@ -1277,8 +1518,8 @@ class _Visible(html.parser.HTMLParser):
 
 
 def visible_text(doc: Path) -> str:
-    src = doc.read_text(encoding="utf-8", errors="replace")
-    if kind(doc) != "html":
+    src = fetch_page(doc) if kind(doc) == "url" else doc.read_text(encoding="utf-8", errors="replace")
+    if not is_markup(doc):
         return src
     p = _Visible()
     p.feed(src)
@@ -1307,8 +1548,8 @@ def cmd_check(args) -> int:
     skill, catalog, where = catalog_for(lang)
     base = rule_ids(skill, lang)
     print("\n".join([
-        f"Самопроверка на нейрослоп: {doc}",
-        f"Видимый текст: {out} ({len(text)} знаков)" + (" – бандл без текста: проверять исходник дека" if kind(doc) == "html" and len(text) < 200 else ""),
+        f"Самопроверка на нейрослоп: {display(doc)}",
+        f"Видимый текст: {out} ({len(text)} знаков)" + (" – бандл без текста: проверять исходник дека" if is_markup(doc) and len(text) < 200 else ""),
         f"Язык: {lang}",
         f"Каталог примет: {catalog}{where}",
         f"Регулярки ловят сами, не искать: {base}",
@@ -1331,7 +1572,7 @@ def cmd_suggest(args) -> int:
     found = found.get("findings", []) if isinstance(found, dict) else found
     cache = json.loads(text_cache(doc).read_text(encoding="utf-8")) if text_cache(doc).is_file() else {"roots": []}
     roots = {r.get("key", ""): r["text"] for r in cache["roots"]}
-    if not roots and kind(doc) != "html":
+    if not roots and not is_markup(doc):
         roots = {"": doc.read_text(encoding="utf-8")}
     out, missed, used = [], [], set()
     for n, f in enumerate(found):

@@ -4,6 +4,17 @@ English · [Русский](CHANGELOG.ru.md)
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [SemVer](https://semver.org/).
 
+## [1.8.0] – 2026-11-25
+
+### Added
+
+- Pages on a local dev server open by address: `revizor.py open http://localhost:4321/pricing` from the project folder. Revizor proxies the dev server, adds its panel to every HTML page and passes scripts, images, the site's own `/api/` and the hot reload websocket through. Tested with Astro on Vite. A landing page built with Astro, Next or Vite can be reviewed on the page, and Claude applies the edits in the project's source files. Only `localhost`, `127.0.0.1` and `::1` open. The review file lives in Revizor's cache next to a small anchor with the address and the project folder, so nothing is added to the project. `wait`, `show`, `mark`, `suggest` and `check` accept the same address.
+
+### Changed
+
+- The panel calls Revizor's API under `/_revizor/api/`, so it does not collide with a site's own `/api/`. The server still answers the old `/api/` paths for files, and a tab opened before the update keeps working.
+- After "Finish round" the tab reloads the same address with a new `v` parameter, keeping the page's own path and query.
+
 ## [1.7.0] – 2026-11-25
 
 ### Added

@@ -7,6 +7,8 @@
   window.__revizor = true;
 
   const CTX = 32;
+  // API Ревизора – под его префиксом: на странице дев-сервера /api/ принадлежит самому сайту
+  const API = "/_revizor/api";
   const MODE = ["text", "md"].includes(document.documentElement.dataset.revizorMode) ? document.documentElement.dataset.revizorMode : "html";
   const IS_TEXT = MODE !== "html"; // текст и Markdown: позиции правок – позиции в файле
   const SKIP = "script, style, noscript, template, textarea";
@@ -1333,7 +1335,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     const roots = allRoots().map((r) => ({ key: r.key || "", label: r.label || "", text: index(r).text })).filter((r) => r.text.trim());
     if (!roots.length) return;
     try {
-      const res = await (await fetch("/api/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roots }) })).json();
+      const res = await (await fetch(API + "/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roots }) })).json();
       if (res.scan) { scan = res.scan; syncPolling(); renderCards(); }
     } catch (e) { /* без сервера проверки нет, регулярки работают */ }
   }
@@ -1508,7 +1510,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
 
   async function poll() {
     let st;
-    try { st = await (await fetch("/api/state")).json(); } catch (e) { return; }
+    try { st = await (await fetch(API + "/state")).json(); } catch (e) { return; }
     const byId = new Map(st.review.items.map((i) => [i.id, i]));
     let changed = false;
     for (const it of items) {
@@ -1539,7 +1541,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
       return;
     }
     let text;
-    try { text = await (await fetch("/api/source")).text(); } catch (e) { return; }
+    try { text = await (await fetch(API + "/source")).text(); } catch (e) { return; }
     document.getElementById("revizor-root").textContent = text;
     renderMarkdown();
     if (MODE === "md") { $("#view").hidden = !mdMap; if (!mdMap && view === "md") setView("plain", false); }
@@ -1921,7 +1923,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
   }
   async function save() {
     try {
-      const r = await fetch("/api/review", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload()) });
+      const r = await fetch(API + "/review", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload()) });
       if (!r.ok) throw new Error(r.status);
       syncClosed((await r.json()).closed || []);
       setStatus("ok", tr("Сохранено"));
@@ -1961,7 +1963,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     items = items.filter(keep);
     clearTimeout(saveTimer);
     try {
-      const r = await fetch("/api/done", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload(), final: !!final }) });
+      const r = await fetch(API + "/done", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload(), final: !!final }) });
       if (!r.ok) throw new Error(r.status);
     } catch (e) {
       setStatus("error", tr("Не отправилось: сервер остановлен"));
@@ -1982,11 +1984,12 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
   function awaitReopen() {
     const t = setInterval(async () => {
       let st;
-      try { st = await (await fetch("/api/state", { cache: "no-store" })).json(); } catch (e) { return; }
+      try { st = await (await fetch(API + "/state", { cache: "no-store" })).json(); } catch (e) { return; }
       if (st.review.status !== "open") return;
       clearInterval(t);
       try { sessionStorage.setItem("revizor-scroll", JSON.stringify({ x: scrollX, y: scrollY, c: 0 })); } catch (e) {}
-      location.replace("/?v=" + Date.now());
+      // тот же адрес с новой меткой: у страницы дев-сервера путь и параметры свои
+      const u = new URL(location.href); u.searchParams.set("v", Date.now()); location.replace(u.href);
     }, 1500);
   }
 
@@ -2165,7 +2168,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
   (async function init() {
     let state;
     try {
-      state = await (await fetch("/api/state")).json();
+      state = await (await fetch(API + "/state")).json();
     } catch (e) {
       setStatus("error", tr("Сервер не отвечает – перезапусти revizor"));
       return;
@@ -2189,7 +2192,7 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
     dismissed = Array.isArray(review.dismissed) ? review.dismissed : [];
     findings = Array.isArray(review.findings) ? review.findings : [];
     scan = review.scan || null;
-    try { const rl = await (await fetch("/api/rules")).json(); styleSkill = rl.skill; compileRules(rl.rules || []); } catch (e) { /* без правил редактор работает как раньше */ }
+    try { const rl = await (await fetch(API + "/rules")).json(); styleSkill = rl.skill; compileRules(rl.rules || []); } catch (e) { /* без правил редактор работает как раньше */ }
     setLive(!!review.live, false);
     ready = true;
     allRoots().forEach(anchorRoot);

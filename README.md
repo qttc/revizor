@@ -56,6 +56,7 @@ Comments on a passage, a block or the whole document pile up in a documents play
 - HTML: reports, decks, slides in iframes, self-unpacking exports.
 - Markdown, shown rendered or as source.
 - Plain text.
+- A page on your local dev server, such as a landing page built with Astro, Next or Vite: ask Claude to open `http://localhost:4321/` in Revizor. Revizor sits between the tab and the dev server, adds its panel to every page and passes everything else through, hot reload included. Claude applies the edits in the project's source files, and the dev server reloads the page. Only local addresses open, and the review file stays in Revizor's cache, so nothing is added to the project.
 
 ## Install
 

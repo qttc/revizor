@@ -1,7 +1,7 @@
 {
   "name": "revizor",
   "displayName": "Revizor",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "Edit AI-written documents in the browser, and Claude Code applies your edits. Flags AI slop and learns your writing style from the edits you make.",
   "author": {
     "name": "qttc",
