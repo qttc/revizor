@@ -1,0 +1,156 @@
+{
+  "version": 1,
+  "about": "Mechanical signs of English text written by a language model. Caught by regex as soon as a document opens, only on lines without Cyrillic. Semantic signs (a moral under the block, a staged run-up, even rhythm) stay with the agent pass and rules/semantic-en.md.",
+  "rules": [
+    {
+      "id": "en-not-just",
+      "title": "Антитеза «not just X, but Y»",
+      "title_en": "Not just X, but Y",
+      "lang": "en",
+      "pattern": "(?:\\bnot|\\b[a-z]+n[’']t)\\s+(?:just|only|merely|simply)\\b[^.!?\\n]{1,60}?(?:\\bbut\\b|\\b(?:it|they|this|that)(?:[’']s|[’']re| is| are)\\b)",
+      "flags": "gi",
+      "why": "Противопоставление спорит с тем, чего никто не говорил. Оставить утверждение Y.",
+      "why_en": "The contrast argues with something nobody said. Keep the claim Y and drop the set-up."
+    },
+    {
+      "id": "en-its-not",
+      "title": "Антитеза «it's not X, it's Y»",
+      "title_en": "It's not X, it's Y",
+      "lang": "en",
+      "pattern": "\\b(?:it|this|that)(?:[’']s| is) not\\b[^.!?\\n]{1,50}?[.,;:—–-]\\s+(?:it|this|that)(?:[’']s| is)\\b",
+      "flags": "gi",
+      "why": "Отрицание ради ритма. Сказать то, что есть, без «не».",
+      "why_en": "Negation for rhythm. Say what the thing is and drop what it is not."
+    },
+    {
+      "id": "en-filler",
+      "title": "Филлер",
+      "title_en": "Filler opener",
+      "lang": "en",
+      "pattern": "\\b(?:it[’']s worth noting(?: that)?|it is worth noting(?: that)?|it[’']s important to (?:note|remember|understand)(?: that)?|it is important to (?:note|remember|understand)(?: that)?|needless to say|in today[’']s (?:fast-paced|digital|ever-changing) world)\\b|(?:^|(?<=[.!?]\\s))(?:Notably|Importantly|Interestingly|Ultimately|Essentially),",
+      "flags": "gim",
+      "why": "Оборот не несёт информации. Удалить и начать с факта.",
+      "why_en": "The phrase carries no information. Delete it and start with the fact."
+    },
+    {
+      "id": "en-announce",
+      "title": "Анонс следующего блока",
+      "title_en": "Announcing the next block",
+      "lang": "en",
+      "pattern": "\\blet[’']s (?:dive (?:in|into|deeper)|take a (?:closer |deeper )?look at|break (?:it|this|that) down|explore|unpack)\\b|\\b(?:here[’']s|here is) (?:what you need to know|the thing|a breakdown)\\b",
+      "flags": "gi",
+      "why": "Обещание вместо содержания. Начать сразу с того, что обещано.",
+      "why_en": "A promise instead of content. Start with what it promises."
+    },
+    {
+      "id": "en-ai-words",
+      "title": "Словарь модели",
+      "title_en": "Model vocabulary",
+      "lang": "en",
+      "pattern": "\\b(?:delv(?:e|es|ed|ing)|tapestry|(?:a|stands as a|serves as a) testament to|in the realm of|pivotal|seamless(?:ly)?|game[- ]changer|deep dive|ever-evolving|embark(?:s|ed|ing)? on|navigat(?:e|es|ing) the (?:complexities|landscape|world)|harness(?:es|ing)? the power)\\b",
+      "flags": "gi",
+      "why": "Слова, которые модели пишут в разы чаще людей. Назвать предмет и действие простыми словами.",
+      "why_en": "Words that models write far more often than people. Name the thing and the action in plain words."
+    },
+    {
+      "id": "en-sales",
+      "title": "Рекламный штамп",
+      "title_en": "Sales cliché",
+      "lang": "en",
+      "pattern": "\\b(?:unlock(?:s|ing)? (?:the |your )?(?:full |true )?potential|take (?:it|your \\w+) to the next level|supercharge[sd]?|revolutioni[sz](?:e|es|ing)|cutting-edge|best-in-class|world-class|next-generation|elevate (?:your|the)\\b)",
+      "flags": "gi",
+      "why": "Обещание без предмета. Сказать, что меняется и насколько.",
+      "why_en": "A promise with no object. Say what changes and by how much."
+    },
+    {
+      "id": "en-ing-rider",
+      "title": "Хвост на -ing",
+      "title_en": "Shallow -ing rider",
+      "lang": "en",
+      "pattern": ",\\s+(?:highlighting|underscoring|emphasi[sz]ing|showcasing|reflecting|ensuring|demonstrating|reinforcing|fostering|paving the way)\\b",
+      "flags": "gi",
+      "why": "Хвост добавляет оценку без факта. Отрезать или сделать отдельным утверждением с фактом.",
+      "why_en": "The tail adds a verdict with no fact. Cut it or make it a sentence with a fact."
+    },
+    {
+      "id": "en-intent-subject",
+      "title": "Неодушевлённый субъект с намерением",
+      "title_en": "Inanimate actor with intent",
+      "lang": "en",
+      "pattern": "\\b(?:the |this |our )?(?:study|research|report|data|platform|design|approach|feature|framework|tool|solution|results?)\\s+(?:underscores|highlights|ensures|showcases|emphasi[sz]es|reflects|strives|aims to|seeks to)\\b",
+      "flags": "gi",
+      "why": "Вещь не может подчёркивать или стремиться. Назвать, кто решил, или сказать сам факт.",
+      "why_en": "A thing cannot underscore or strive. Name who decided, or state the fact."
+    },
+    {
+      "id": "en-serves-as",
+      "title": "Вместо «is»",
+      "title_en": "Avoiding is",
+      "lang": "en",
+      "pattern": "\\b(?:serves|stands|functions|acts) as (?:a|an|the)\\b",
+      "flags": "gi",
+      "why": "Длинная связка вместо «is». Написать просто.",
+      "why_en": "A long link verb in place of is. Write it plainly."
+    },
+    {
+      "id": "en-comparative-triad",
+      "title": "Триплет сравнений",
+      "title_en": "Triad of comparatives",
+      "lang": "en",
+      "pattern": "\\b(?:\\w+er|more \\w+), (?:\\w+er|more \\w+),? and (?:\\w+er|more \\w+)\\b",
+      "flags": "gi",
+      "why": "Три размытых улучшения подряд читаются как слоган. Назвать одно измеримое.",
+      "why_en": "Three vague improvements in a row read as a slogan. Name the one you can measure."
+    },
+    {
+      "id": "en-staccato",
+      "title": "Рубленый ряд",
+      "title_en": "Staccato slogan",
+      "lang": "en",
+      "pattern": "(?:^|(?<=[.!?]\\s))(?!(?:Mr|Mrs|Ms|Dr|St|Jr|Sr|Inc|Ltd|vs|etc)\\.)(?:[A-Z][a-z]*(?: [a-z]+){0,2}\\. ){2}[A-Z][a-z]*(?: [a-z]+){0,2}\\.(?=\\s|$)",
+      "flags": "gm",
+      "why": "Три обрубка подряд: «Short. Sharp. Done.» Собрать в обычное предложение.",
+      "why_en": "Three fragments in a row: “Short. Sharp. Done.” Merge them into a normal sentence."
+    },
+    {
+      "id": "en-superlative",
+      "title": "Превосходная степень без числа",
+      "title_en": "Superlative without a number",
+      "lang": "en",
+      "pattern": "\\b(?:the single most|arguably the (?:most|best)|every single|truly (?:special|unique|remarkable|transformative)|incredibly powerful)\\b",
+      "flags": "gi",
+      "why": "Усилитель вместо доказательства. Число или факт вместо оценки.",
+      "why_en": "An intensifier instead of evidence. A number or a fact instead of the verdict."
+    },
+    {
+      "id": "en-forward",
+      "title": "Переход в будущее",
+      "title_en": "Forward-looking transition",
+      "lang": "en",
+      "pattern": "(?:^|(?<=[.!?]\\s))(?:Looking ahead|Moving forward|Going forward|In conclusion|At the end of the day|All in all),",
+      "flags": "gm",
+      "why": "Переход без содержания. Сразу следующий факт.",
+      "why_en": "A transition with no content. Go straight to the next fact."
+    },
+    {
+      "id": "en-chatbot",
+      "title": "Остаток чата",
+      "title_en": "Chatbot residue",
+      "lang": "en",
+      "pattern": "\\b(?:certainly!|great question|i hope this helps|let me know if you(?:[’']d like| want| need)|as of my last (?:update|knowledge)|as an ai\\b)",
+      "flags": "gi",
+      "why": "Реплика из чата попала в документ. Удалить.",
+      "why_en": "A line from the chat ended up in the document. Delete it."
+    },
+    {
+      "id": "en-vague-authority",
+      "title": "Ссылка на безымянный авторитет",
+      "title_en": "Borrowed authority",
+      "lang": "en",
+      "pattern": "\\b(?:experts|studies|research(?:ers)?|many people) (?:agree|show|suggest|say|believe)\\b|\\bit is widely (?:believed|known|recognized|accepted)\\b",
+      "flags": "gi",
+      "why": "Кто именно? Дать источник или убрать.",
+      "why_en": "Who exactly? Give the source or drop it."
+    }
+  ]
+}

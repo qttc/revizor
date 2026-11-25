@@ -4,6 +4,18 @@ English · [Русский](CHANGELOG.ru.md)
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions: [SemVer](https://semver.org/).
 
+## [1.7.0] – 2026-11-25
+
+### Added
+
+- 15 base rules for English text in `rules/en.json`: "not just X, but Y", "it's not X, it's Y", filler openers, announcing the next block, model vocabulary (delve, seamless, testament to), sales clichés, shallow -ing riders, an inanimate actor with intent, "serves as", a triad of comparatives, staccato slogans, superlatives without a number, forward-looking transitions, chatbot residue, borrowed authority. Before this release only the em dash and a few model phrases were caught in English. An English rule fires only on lines without Cyrillic.
+- `rules/semantic-en.md`: the base catalog for the semantic pass on English documents, used when the style skill has no English catalog. A new style skill starts with both catalogs.
+
+### Changed
+
+- A finding is explained in the language of the text it was found in: an English phrase gets an English title and reason even when the panel is in Russian. The agent writes its own findings in the document language too.
+- The semantic pass and `check` list only the rules that fire on the document's language, so the agent does not get Russian rule ids for an English text.
+
 ## [1.6.3] – 2026-11-22
 
 ### Fixed

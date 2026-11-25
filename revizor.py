@@ -44,7 +44,7 @@ try:
 except ImportError:  # Windows: блокировки файла правок на fcntl, без них два процесса потеряют правки
     fcntl = None
 
-__version__ = "1.6.3"
+__version__ = "1.7.0"
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
@@ -57,6 +57,7 @@ ASSET_PREFIX = "/_revizor/"
 OVERLAY_TAG = f'<script src="{ASSET_PREFIX}overlay.js" defer></script>'
 FORMAT_VERSION = 1
 RULES_DIR = ROOT / "rules"
+BASE_RULES = ("ru.json", "en.json")  # правило с полем lang работает только на строках своего языка
 TEMPLATE = ROOT / "templates" / "style-skill"
 CACHE = Path.home() / ".cache" / "revizor"
 REGISTRY = CACHE / "docs.json"      # какие документы открывались в Ревизоре – отсюда берутся пары для обучения
@@ -485,9 +486,10 @@ def find_style_skill(min_score: int = 30, lang=None):
 
 
 def load_rules(skill=None) -> dict:
-    """Правила проверки: базовые из rules/ плюс правила скилла (revizor-rules.json). Правило скилла с тем же id
+    """Правила проверки: базовые из rules/ (русские и английские) плюс правила скилла (revizor-rules.json). Правило скилла с тем же id
     заменяет базовое, "off": true – выключает его."""
-    rules = {r["id"]: dict(r, source="base") for r in json.loads((RULES_DIR / "ru.json").read_text(encoding="utf-8"))["rules"]}
+    rules = {r["id"]: dict(r, source="base") for f in BASE_RULES
+             for r in json.loads((RULES_DIR / f).read_text(encoding="utf-8"))["rules"]}
     if skill:
         f = Path(skill["path"]) / "revizor-rules.json"
         if f.is_file():
@@ -537,7 +539,8 @@ def init_style_skill(name=None) -> dict:
     else:
         sys.exit(f"скилл {cand} уже есть: {d}")
     shutil.copytree(TEMPLATE, d)
-    shutil.copy(RULES_DIR / "semantic-ru.md", d / "references" / "ai-tells-ru.md")  # каталог стартует с базового, дальше растёт из правок
+    for lang in ("ru", "en"):  # каталоги стартуют с базовых, дальше растут из правок
+        shutil.copy(RULES_DIR / f"semantic-{lang}.md", d / "references" / f"ai-tells-{lang}.md")
     md = d / "SKILL.md"
     md.write_text(md.read_text(encoding="utf-8").replace("{{name}}", d.name), encoding="utf-8")
     return {"name": d.name, "path": str(d)}
@@ -1216,6 +1219,11 @@ def catalog_for(lang: str):
     return skill, catalog, where
 
 
+def rule_ids(skill, lang: str) -> str:
+    """id правил, которые сработают на тексте этого языка: агенту незачем знать про русские правила в английском тексте."""
+    return ", ".join(r["id"] for r in load_rules(skill)["rules"] if r.get("lang", "any") in ("any", lang))
+
+
 def scan_task(doc: Path, review: dict) -> str:
     """Задание агенту на смысловую проверку: где текст, по какому каталогу искать, что уже поймали регулярки."""
     try:
@@ -1224,7 +1232,7 @@ def scan_task(doc: Path, review: dict) -> str:
     except (OSError, ValueError, KeyError):
         lang = doc_lang(doc)
     skill, catalog, where = catalog_for(lang)
-    base = ", ".join(r["id"] for r in load_rules(skill)["rules"])
+    base = rule_ids(skill, lang)
     return "\n".join([
         f"Проверка на нейрослоп: {doc}",
         f"Текст страницы: {text_cache(doc)} (roots[].key – корень: \"\" страница, иначе фрейм слайда)",
@@ -1297,7 +1305,7 @@ def cmd_check(args) -> int:
     atomic_write(out, text)
     lang = text_lang(text)
     skill, catalog, where = catalog_for(lang)
-    base = ", ".join(r["id"] for r in load_rules(skill)["rules"])
+    base = rule_ids(skill, lang)
     print("\n".join([
         f"Самопроверка на нейрослоп: {doc}",
         f"Видимый текст: {out} ({len(text)} знаков)" + (" – бандл без текста: проверять исходник дека" if kind(doc) == "html" and len(text) < 200 else ""),

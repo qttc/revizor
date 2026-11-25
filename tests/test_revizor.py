@@ -635,9 +635,45 @@ class StyleSkillTest(unittest.TestCase):
             self.assertTrue(r["id"] and r["title"] and r["pattern"] and r["why"], r)
 
     def test_base_rules_have_english_title_and_why(self):
-        for r in json.loads((revizor.RULES_DIR / "ru.json").read_text(encoding="utf-8"))["rules"]:
-            self.assertTrue(r.get("title_en") and r.get("why_en"), r["id"])
-            self.assertNotIn("—", r["title_en"] + r["why_en"], r["id"])
+        for f in revizor.BASE_RULES:
+            for r in json.loads((revizor.RULES_DIR / f).read_text(encoding="utf-8"))["rules"]:
+                self.assertTrue(r.get("title_en") and r.get("why_en"), r["id"])
+                self.assertNotIn("—", r["title_en"] + r["why_en"], r["id"])
+
+    def test_base_rule_ids_are_unique(self):
+        ids = [r["id"] for f in revizor.BASE_RULES for r in json.loads((revizor.RULES_DIR / f).read_text(encoding="utf-8"))["rules"]]
+        self.assertEqual(len(ids), len(set(ids)))
+
+    def test_english_rules_catch_slop_and_spare_plain_text(self):
+        # английские правила без \p{L}: их понимает и re Питона, и RegExp браузера
+        hit = {
+            "en-not-just": "This isn't just a better number \u2014 it's a signal.",
+            "en-its-not": "It's not about speed. It's about trust.",
+            "en-filler": "It's worth noting that this week was big.",
+            "en-announce": "Let's dive into the plan:",
+            "en-ai-words": "We delve into the data.",
+            "en-sales": "Unlock your full potential.",
+            "en-ing-rider": "Retention grew, highlighting the importance of onboarding.",
+            "en-intent-subject": "The study underscores the risk.",
+            "en-serves-as": "The page serves as a hub.",
+            "en-comparative-triad": "The new flow is faster, smarter, and more intuitive.",
+            "en-staccato": "No meetings. No reports. Just work.",
+            "en-superlative": "We're building something truly special.",
+            "en-forward": "Looking ahead, we will grow.",
+            "en-chatbot": "I hope this helps.",
+            "en-vague-authority": "Studies show that users churn.",
+        }
+        plain = ["Trial starts went from 31% to 38% in seven days.", "Not now, but next week we ship the paywall.",
+                 "The report is ready. Open it in the browser.", "Mr. Smith arrived. He left.", "The data shows a 7 p.p. lift."]
+        rules = json.loads((revizor.RULES_DIR / "en.json").read_text(encoding="utf-8"))["rules"]
+        self.assertEqual({r["id"] for r in rules}, set(hit))
+        for r in rules:
+            flags = (re.I if "i" in r["flags"] else 0) | (re.M if "m" in r["flags"] else 0)
+            rx = re.compile(r["pattern"], flags)
+            self.assertEqual(r["lang"], "en", r["id"])
+            self.assertTrue(rx.search(hit[r["id"]]), r["id"])
+            for s in plain:
+                self.assertIsNone(rx.search(s), (r["id"], s))
 
 
 class RadarServerTest(ServerTest.__base__):

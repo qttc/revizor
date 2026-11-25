@@ -94,9 +94,10 @@
     const out = LANG === "en" && EN[s] !== undefined ? EN[s] : s;
     return vars ? out.replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m)) : out;
   };
-  // Название и пояснение правила: в английской панели – title_en и why_en, если они есть у правила.
-  const ruleTitle = (rule) => (LANG === "en" && rule.title_en) || rule.title;
-  const ruleWhy = (rule) => (LANG === "en" && rule.why_en) || rule.why;
+  // Название и пояснение правила – на языке текста, где сработало правило: английская находка объясняется по-английски
+  // и в русской панели. title_en и why_en есть у базовых правил, у правил скилла их может не быть.
+  const ruleTitle = (rule, lang = LANG) => (lang === "en" && rule.title_en) || rule.title;
+  const ruleWhy = (rule, lang = LANG) => (lang === "en" && rule.why_en) || rule.why;
   const HL_CSS = `
     ::highlight(rv-edit) { background-color: rgba(255, 196, 0, .38); text-decoration: line-through 1.5px rgba(160, 100, 0, .9); }
     ::highlight(rv-comment) { background-color: rgba(255, 196, 0, .28); text-decoration: underline dotted 1.5px rgba(200, 130, 0, .95); text-underline-offset: 3px; }
@@ -1290,9 +1291,10 @@ header, h1, .rule, .bill .sub, .tools-label, .meta, #min { transition: padding .
         <div class="hit-acts"><button class="btn sm solid" data-a="${allFix ? "fix" : "edit"}">${tr(allFix ? (byAgent ? "Принять" : "Исправить") : "Переписать")}</button>${allFix && byAgent ? `<button class="btn sm" data-a="edit">${tr("Поправить")}</button>` : `<button class="btn sm" data-a="agent">${tr("Агенту")}</button>`}</div>`;
       if (byAgent) { const nw = row.querySelector(".hit-new"), v = squash(fixedText(g, text)).trim(); nw.hidden = false; nw.textContent = v || tr("удалить предложение"); nw.classList.toggle("gone", !v); }
       const uniq = g.hits.filter((h, i, a) => a.findIndex((x) => x.rule.id === h.rule.id) === i);
-      row.querySelector(".hit-rule").textContent = uniq.map((h) => ruleTitle(h.rule)).join(" · ");
+      const tl = CYR_RX.test(text.slice(g.start, g.end)) ? "ru" : "en";
+      row.querySelector(".hit-rule").textContent = uniq.map((h) => ruleTitle(h.rule, tl)).join(" · ");
       const why = row.querySelector(".hit-why");
-      why.textContent = uniq.map((h) => ruleWhy(h.rule)).join(" ");
+      why.textContent = uniq.map((h) => ruleWhy(h.rule, tl)).join(" ");
       why.title = why.textContent;
       const q = row.querySelector(".hit-quote");
       let pos = Math.max(g.start, g.hits[0].start - 70);
